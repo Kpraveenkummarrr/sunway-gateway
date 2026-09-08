@@ -1,0 +1,37 @@
+# Environment / secrets
+.env
+.env.*
+!.env.example
+
+# Python
+__pycache__/
+*.pyc
+.venv/
+venv/
+*.egg-info/
+.pytest_cache/
+
+# Node (if any admin UI is added later)
+node_modules/
+dist/
+build/
+
+# Call recordings and logs (never commit customer audio)
+recordings/**
+!recordings/.gitkeep
+*.wav
+*.log
+
+# Asterisk runtime state (not config)
+asterisk/var/
+asterisk/*.sock
+
+# OS / editor
+.DS_Store
+Thumbs.db
+.vscode/
+.idea/
+
+# Backups
+*.bak
+*.dump
