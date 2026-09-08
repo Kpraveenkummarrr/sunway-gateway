@@ -4,6 +4,7 @@ from contextlib import asynccontextmanager
 from fastapi import FastAPI
 
 from app.api.health import router as health_router
+from app.api.knowledge import router as knowledge_router
 from app.core.config import get_settings
 from app.core.logging import get_logger
 
@@ -20,3 +21,4 @@ async def lifespan(_: FastAPI) -> AsyncGenerator[None, None]:
 app = FastAPI(title="Sunway GSM Gateway — AI Voice Agent Backend", lifespan=lifespan)
 
 app.include_router(health_router)
+app.include_router(knowledge_router)

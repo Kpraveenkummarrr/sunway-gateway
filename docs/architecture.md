@@ -28,13 +28,63 @@ Asterisk (PJSIP)                        [READY WITHOUT GATEWAY — implemented a
    |
    +--> AI Voice Agent (FastAPI backend)  [READY WITHOUT GATEWAY]
            |
-           +--> STT (provider abstraction)
-           +--> RAG (PostgreSQL + pgvector, PDF knowledge base)
-           +--> LLM (provider abstraction, grounded answers only)
-           +--> TTS (provider abstraction)
+           +--> STT (provider abstraction)              [NOT YET IMPLEMENTED]
+           +--> RAG (PostgreSQL + pgvector, PDF knowledge base)   [READY WITHOUT GATEWAY —
+           |                                                       implemented and tested, see below]
+           +--> LLM (provider abstraction, grounded answers only) [NOT YET IMPLEMENTED]
+           +--> TTS (provider abstraction)              [NOT YET IMPLEMENTED]
            |
            +--> Escalate to staff routing if low-confidence / requested
 ```
+
+## RAG / knowledge ingestion pipeline (Phase 4)
+
+Status: **READY WITHOUT GATEWAY** — fully implemented and tested, no
+telephony or SMG4004 involvement.
+
+```
+PDF (uploaded via POST /api/knowledge/upload)
+   |
+   v
+Text extraction (pypdf) — per-page, validates it's actually a PDF,
+   |                       detects empty/scanned PDFs and rejects clearly
+   v
+Whitespace normalization
+   |
+   v
+Chunking (paragraph-aware, configurable size/overlap,
+   |       page number preserved per chunk)
+   v
+Embedding provider (pluggable: "openai" | "mock" for dev/test —
+   |                  never called with a real vendor unless configured)
+   v
+pgvector (knowledge_chunks.embedding, vector(1536))
+   |
+   v
+Similarity search (POST /api/knowledge/search — cosine distance,
+                    top-K, optional similarity threshold)
+```
+
+**Not yet built on top of this**: the LLM conversation layer that would
+take search results and produce a spoken answer (STT → RAG → LLM → TTS,
+per the original architecture) — this phase stops at retrieval.
+
+Full details, API endpoints, and test results: see the Phase 4 report /
+`backend/app/services/{pdf_extraction,chunking,knowledge_ingestion,knowledge_search}.py`.
+
+**Known pgvector gotcha, fixed in this phase**: the `knowledge_chunks`
+table's `ivfflat` index was originally created in the Phase 2 migration
+while the table was empty. pgvector computes an ivfflat index's cluster
+centroids from whatever data exists at `CREATE INDEX` time, so an index
+built empty is degenerate and can silently return zero results for
+`ORDER BY embedding <=> :query LIMIT :n` — confirmed directly against a
+live Postgres instance (Postgres itself warns "ivfflat index created with
+little data ... This will cause low recall" on creation). Fixed by
+dropping the index (migration `5e5509c26b5e`) and relying on an exact
+sequential scan, which is fast enough at the row counts this project
+expects (tens to low hundreds of chunks per small-business knowledge
+base). Re-add an ANN index later only if the corpus grows large enough
+to need one.
 
 ## Infrastructure
 

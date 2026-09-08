@@ -53,13 +53,11 @@ class KnowledgeChunk(TimestampMixin, Base):
 
     document: Mapped["KnowledgeDocument"] = relationship(back_populates="chunks")
 
+    # No ivfflat/ANN index here — see db/migrations/versions/5e5509c26b5e_*
+    # for why (an ivfflat index built on an empty table gives a degenerate,
+    # silently-wrong approximate search). Similarity search runs an exact
+    # scan, which is fine at the row counts this project expects; revisit
+    # if the knowledge base ever grows large enough to need an ANN index.
     __table_args__ = (
         Index("ix_knowledge_chunks_document_chunk", "document_id", "chunk_index"),
-        Index(
-            "ix_knowledge_chunks_embedding_ivfflat",
-            "embedding",
-            postgresql_using="ivfflat",
-            postgresql_with={"lists": 100},
-            postgresql_ops={"embedding": "vector_cosine_ops"},
-        ),
     )

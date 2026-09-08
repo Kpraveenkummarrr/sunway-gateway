@@ -52,11 +52,16 @@ class Settings(BaseSettings):
     tts_provider: str = ""
     tts_api_key: str = ""
 
+    rag_embedding_provider: str = ""  # "" | "mock" | "openai"
+    rag_embedding_api_key: str = ""
     rag_embedding_model: str = ""
+    rag_embedding_dimensions: int = 1536  # must match knowledge_chunks.embedding column
     rag_top_k: int = 4
     rag_similarity_threshold: float = 0.75
     rag_chunk_size: int = 800
     rag_chunk_overlap: int = 150
+
+    knowledge_storage_path: str = "./data/knowledge_documents"
 
     recording_enabled: bool = True
     recording_path: str = "/var/lib/sunway-gateway/recordings"

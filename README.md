@@ -7,7 +7,7 @@ AI voice agent that answers caller questions using a PDF/knowledge base
 
 ## Status
 
-Project is at **Phase 3 (Asterisk/PJSIP telephony foundation)**. See
+Project is at **Phase 4 (PDF knowledge ingestion + pgvector retrieval)**. See
 [docs/architecture.md](docs/architecture.md) for the target architecture,
 [docs/asterisk.md](docs/asterisk.md) for the Asterisk/PJSIP/IVR setup and
 test results, and
@@ -116,6 +116,47 @@ curl http://127.0.0.1:8000/ready    # readiness — DB + pgvector reachable
 ```
 
 ### 3. Tests
+
+```bash
+cd backend
+./.venv/Scripts/python.exe -m pytest -v
+```
+
+## Knowledge base / PDF ingestion (Phase 4)
+
+No API key needed for local dev/testing — set `RAG_EMBEDDING_PROVIDER=mock`
+in `backend/.env` (already the default in this repo's local setup). This
+produces deterministic but semantically meaningless vectors; never use it
+for a real knowledge base. For real ingestion, set
+`RAG_EMBEDDING_PROVIDER=openai` and `RAG_EMBEDDING_API_KEY` (and
+`pip install openai`, not installed by default).
+
+With the backend running (`uvicorn app.main:app --reload`):
+
+```bash
+# Upload a PDF (add -H "X-Internal-Api-Key: <key>" if INTERNAL_API_KEY is set)
+curl -X POST http://127.0.0.1:8000/api/knowledge/upload \
+  -F "file=@/path/to/document.pdf;type=application/pdf"
+
+# List documents
+curl http://127.0.0.1:8000/api/knowledge
+
+# Get one document's status
+curl http://127.0.0.1:8000/api/knowledge/<document_id>
+
+# Search
+curl -X POST http://127.0.0.1:8000/api/knowledge/search \
+  -H "Content-Type: application/json" \
+  -d '{"query": "your question here"}'
+
+# Delete
+curl -X DELETE http://127.0.0.1:8000/api/knowledge/<document_id>
+```
+
+Tests (`backend/tests/test_pdf_extraction.py`, `test_chunking.py`,
+`test_embeddings.py`, `test_knowledge_ingestion.py`,
+`test_knowledge_search.py`, `test_knowledge_api.py`) run against the real
+dev database with the mock embedding provider — no network calls, no cost:
 
 ```bash
 cd backend
