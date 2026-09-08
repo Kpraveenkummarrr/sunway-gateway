@@ -1,0 +1,25 @@
+; ==============================================================================
+; SIP auth secrets — TEMPLATE ONLY. Never commit real credentials.
+;
+; Copy this file to pjsip_auth.conf (gitignored) and replace each password,
+; or run asterisk/scripts/generate_sip_secrets.sh to generate one with
+; random passwords automatically.
+; ==============================================================================
+
+[1001]
+type=auth
+auth_type=userpass
+username=1001
+password=CHANGE_ME_1001
+
+[1002]
+type=auth
+auth_type=userpass
+username=1002
+password=CHANGE_ME_1002
+
+[1003]
+type=auth
+auth_type=userpass
+username=1003
+password=CHANGE_ME_1003

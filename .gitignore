@@ -26,6 +26,9 @@ recordings/**
 asterisk/var/
 asterisk/*.sock
 
+# Asterisk SIP auth secrets (generated locally; see pjsip_auth.conf.example)
+asterisk/etc/pjsip/pjsip_auth.conf
+
 # OS / editor
 .DS_Store
 Thumbs.db

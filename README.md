@@ -7,8 +7,10 @@ AI voice agent that answers caller questions using a PDF/knowledge base
 
 ## Status
 
-Project is at **Phase 2 (backend + database foundation)**. See
-[docs/architecture.md](docs/architecture.md) for the target architecture and
+Project is at **Phase 3 (Asterisk/PJSIP telephony foundation)**. See
+[docs/architecture.md](docs/architecture.md) for the target architecture,
+[docs/asterisk.md](docs/asterisk.md) for the Asterisk/PJSIP/IVR setup and
+test results, and
 [docs/client-information-required.md](docs/client-information-required.md)
 for what's needed from the client before later phases can proceed.
 
@@ -118,6 +120,25 @@ curl http://127.0.0.1:8000/ready    # readiness — DB + pgvector reachable
 ```bash
 cd backend
 ./.venv/Scripts/python.exe -m pytest -v
+```
+
+## Asterisk / PJSIP setup (Phase 3)
+
+Native install (no Docker), SIP softphone testing only — see
+[docs/asterisk.md](docs/asterisk.md) for full details and test results.
+
+```bash
+sudo apt-get install -y asterisk
+cd asterisk/scripts
+./generate_sip_secrets.sh   # generates test-extension passwords, gitignored
+sudo ./deploy.sh            # backs up existing config, deploys ours, reloads
+```
+
+Verify:
+
+```bash
+sudo asterisk -rx "pjsip show endpoints"
+sudo asterisk -rx "dialplan show internal"
 ```
 
 ## Important note on the gateway

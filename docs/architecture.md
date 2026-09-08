@@ -16,9 +16,10 @@ GSM Caller
 Synway SMG4004 GSM Gateway              [REQUIRES PHYSICAL SMG4004]
    |  (SIP + RTP)
    v
-Asterisk (PJSIP)                        [READY WITHOUT GATEWAY — testable via SIP softphones]
+Asterisk (PJSIP)                        [READY WITHOUT GATEWAY — implemented and tested with
+   |                                       SIP softphones/SIPp, see docs/asterisk.md]
    |
-   +--> IVR (DTMF menu)                 [READY WITHOUT GATEWAY]
+   +--> IVR (DTMF menu)                 [READY WITHOUT GATEWAY — implemented and tested]
    |       |
    |       +--> Staff routing (Sales / Support / Accounts)   [READY WITHOUT GATEWAY for SIP leg;
    |       |                                                   REQUIRES PHYSICAL SMG4004 for outbound GSM leg]
@@ -47,12 +48,15 @@ Single Ubuntu/Debian VPS:
 
 Explicitly avoided: Kubernetes, multiple VPS nodes, message queues (Kafka/Redis clusters), managed enterprise PBX, custom SIP stack, unnecessary microservices.
 
-## Data model (planned tables)
+## Data model
 
 `calls`, `call_events`, `ivr_selections`, `ai_sessions`, `ai_messages`,
 `recordings`, `staff_routes`, `gsm_channels`, `knowledge_documents`,
-`knowledge_chunks`, `system_logs`. Defined in Phase 8–11 as Alembic
-migrations under `db/migrations/`.
+`knowledge_chunks`, `system_logs`. Implemented in Phase 2 as SQLAlchemy
+models + an Alembic migration under `db/migrations/` (see
+`backend/app/models/`), running against PostgreSQL + pgvector. Not yet
+wired up to Asterisk (the Phase 3 dialplan logs to Asterisk's own
+CDR/log files, not to these tables — that integration is a later phase).
 
 ## Concurrency model
 
