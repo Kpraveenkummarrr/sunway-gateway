@@ -13,7 +13,13 @@ class AISession(TimestampMixin, Base):
     __tablename__ = "ai_sessions"
 
     id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
-    call_id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), ForeignKey("calls.id"), index=True)
+    # Nullable: Phase 5 sessions are created and tested via the text/audio
+    # API before any telephony integration exists, so there may be no Call
+    # row yet. Once a session is bridged to an actual phone call (a later
+    # phase), call_id gets populated.
+    call_id: Mapped[uuid.UUID | None] = mapped_column(
+        UUID(as_uuid=True), ForeignKey("calls.id"), index=True, nullable=True
+    )
 
     language: Mapped[str] = mapped_column(String(16), default="en")
     status: Mapped[str] = mapped_column(String(32), default="active")
@@ -22,7 +28,7 @@ class AISession(TimestampMixin, Base):
     escalated_to_staff: Mapped[bool] = mapped_column(default=False)
     escalation_reason: Mapped[str | None] = mapped_column(String(255), nullable=True)
 
-    call: Mapped["Call"] = relationship(back_populates="ai_sessions")  # noqa: F821
+    call: Mapped["Call | None"] = relationship(back_populates="ai_sessions")  # noqa: F821
     messages: Mapped[list["AIMessage"]] = relationship(back_populates="session", cascade="all, delete-orphan")
 
 

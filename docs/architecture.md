@@ -28,14 +28,83 @@ Asterisk (PJSIP)                        [READY WITHOUT GATEWAY — implemented a
    |
    +--> AI Voice Agent (FastAPI backend)  [READY WITHOUT GATEWAY]
            |
-           +--> STT (provider abstraction)              [NOT YET IMPLEMENTED]
+           +--> STT (provider abstraction)                       [READY — abstraction + mock tested;
+           |                                                       real provider untested, no credentials]
            +--> RAG (PostgreSQL + pgvector, PDF knowledge base)   [READY WITHOUT GATEWAY —
            |                                                       implemented and tested, see below]
-           +--> LLM (provider abstraction, grounded answers only) [NOT YET IMPLEMENTED]
-           +--> TTS (provider abstraction)              [NOT YET IMPLEMENTED]
+           +--> LLM (provider abstraction, grounded answers only) [READY — abstraction + mock tested;
+           |                                                       real provider untested, no credentials]
+           +--> TTS (provider abstraction)                       [READY — abstraction + mock tested;
+           |                                                       real provider untested, no credentials]
            |
-           +--> Escalate to staff routing if low-confidence / requested
+           +--> Escalate to staff routing if low-confidence / requested   [NOT YET IMPLEMENTED]
 ```
+
+## AI conversation orchestration (Phase 5)
+
+Status: **READY** (text/audio API, file/buffer based) — no telephony or
+SMG4004 involvement, no real-time streaming.
+
+```
+Audio (buffer, e.g. an uploaded file)
+   |
+   v
+STT (provider abstraction: "openai" | "mock")
+   |
+   v
+Conversation Service (app/services/conversation.py)
+   |  - creates/loads an ai_sessions row, isolated by session id
+   |  - stores the caller's message (ai_messages)
+   v
+RAG / pgvector (reuses Phase 4 search_chunks() as-is)
+   |  - embeds the query, top-K + similarity-threshold filtered search
+   |  - bounded context string built from results (app/services/rag_context.py),
+   |    capped at AI_MAX_CONTEXT_CHARS — never the whole document
+   v
+LLM (provider abstraction: "openai" | "mock")
+   |  - configurable system prompt (AI_SYSTEM_PROMPT, has a built-in
+   |    default) + windowed conversation history (AI_MAX_HISTORY_MESSAGES)
+   |    + the bounded RAG context
+   |  - if no knowledge was retrieved, the prompt policy is what decides
+   |    the response (mock provider mirrors this with a fixed "no
+   |    supporting knowledge" answer; a real LLM is instructed the same way)
+   v
+Conversation Service
+   |  - stores the assistant's reply (ai_messages)
+   v
+TTS (provider abstraction: "openai" | "mock")
+   |
+   v
+Audio (buffer)
+```
+
+**Providers**: `app/providers/{stt,llm,tts}/` — each has a `base.py` ABC,
+a deterministic `mock.py` (dev/test only, clearly documented as not
+recreating real behavior), an `openai_provider.py` (lazy-imports `openai`,
+never called unless the provider is explicitly configured), and a
+`factory.py` that fails loudly if unconfigured rather than silently
+falling back to a mock. No real provider call has been made — no working
+API credentials were available this phase (see the Phase 5 report). The
+abstractions and mock-backed pipeline are fully implemented and tested.
+
+**API**: `POST /api/conversation/sessions`, `GET
+/api/conversation/sessions/{id}`, `POST
+/api/conversation/sessions/{id}/messages` (primary dev/test path — text
+in, text out), `POST /api/conversation/sessions/{id}/audio` (file-based
+audio in, base64 audio out), `POST
+/api/conversation/sessions/{id}/end`. All gated behind `INTERNAL_API_KEY`,
+same as the Phase 4 knowledge endpoints.
+
+**Session isolation**: every session is its own `ai_sessions` row;
+`ai_sessions.call_id` was made nullable (migration `c88159bbc9cf`) since
+these sessions aren't attached to a phone call yet. All message
+reads/writes are scoped by `session_id` — verified with a dedicated
+cross-session-isolation test.
+
+**NOT YET**: real-time audio streaming, Asterisk/ARI/AMI call control, RTP
+audio bridging, GSM/SMG4004 integration, production voice calling, staff
+escalation logic. This phase is the orchestration layer and its
+text/file-based test harness only.
 
 ## RAG / knowledge ingestion pipeline (Phase 4)
 

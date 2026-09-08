@@ -7,7 +7,7 @@ AI voice agent that answers caller questions using a PDF/knowledge base
 
 ## Status
 
-Project is at **Phase 4 (PDF knowledge ingestion + pgvector retrieval)**. See
+Project is at **Phase 5 (AI conversation orchestration)**. See
 [docs/architecture.md](docs/architecture.md) for the target architecture,
 [docs/asterisk.md](docs/asterisk.md) for the Asterisk/PJSIP/IVR setup and
 test results, and
@@ -157,6 +157,51 @@ Tests (`backend/tests/test_pdf_extraction.py`, `test_chunking.py`,
 `test_embeddings.py`, `test_knowledge_ingestion.py`,
 `test_knowledge_search.py`, `test_knowledge_api.py`) run against the real
 dev database with the mock embedding provider — no network calls, no cost:
+
+```bash
+cd backend
+./.venv/Scripts/python.exe -m pytest -v
+```
+
+## AI conversation orchestration (Phase 5)
+
+Same mock-provider approach as Phase 4 — set `LLM_PROVIDER=mock`,
+`STT_PROVIDER=mock`, `TTS_PROVIDER=mock` in `backend/.env` (already the
+default in this repo's local setup) for local dev/testing with no API
+key and no cost. For real responses, set the provider to `openai` and the
+matching `*_API_KEY` (and `pip install openai`, not installed by
+default) — **no real provider has been tested in this project**; no
+working API credentials were available during development.
+
+With the backend running and at least one knowledge document uploaded
+(see above):
+
+```bash
+# Create a session
+curl -X POST http://127.0.0.1:8000/api/conversation/sessions \
+  -H "Content-Type: application/json" -d '{}'
+
+# Send a text message (primary dev/test path)
+curl -X POST http://127.0.0.1:8000/api/conversation/sessions/<session_id>/messages \
+  -H "Content-Type: application/json" \
+  -d '{"text": "your question here"}'
+
+# Get session + full history
+curl http://127.0.0.1:8000/api/conversation/sessions/<session_id>
+
+# Send audio (file/buffer based — not a real-time stream; with the mock
+# STT provider, the "audio" file's bytes are just UTF-8 text)
+curl -X POST http://127.0.0.1:8000/api/conversation/sessions/<session_id>/audio \
+  -F "file=@question.txt;type=application/octet-stream"
+
+# End the session
+curl -X POST http://127.0.0.1:8000/api/conversation/sessions/<session_id>/end
+```
+
+Tests (`test_stt.py`, `test_llm.py`, `test_tts.py`, `test_rag_context.py`,
+`test_conversation.py`, `test_audio_orchestration.py`,
+`test_conversation_api.py`) run against the real dev database with mock
+providers — no network calls, no cost:
 
 ```bash
 cd backend

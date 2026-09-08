@@ -3,6 +3,7 @@ from contextlib import asynccontextmanager
 
 from fastapi import FastAPI
 
+from app.api.conversation import router as conversation_router
 from app.api.health import router as health_router
 from app.api.knowledge import router as knowledge_router
 from app.core.config import get_settings
@@ -22,3 +23,4 @@ app = FastAPI(title="Sunway GSM Gateway — AI Voice Agent Backend", lifespan=li
 
 app.include_router(health_router)
 app.include_router(knowledge_router)
+app.include_router(conversation_router)
