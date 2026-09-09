@@ -29,6 +29,9 @@ asterisk/*.sock
 # Asterisk SIP auth secrets (generated locally; see pjsip_auth.conf.example)
 asterisk/etc/pjsip/pjsip_auth.conf
 
+# Asterisk ARI secrets (generated locally; see ari.conf.example)
+asterisk/etc/ari.conf
+
 # Locally-uploaded knowledge base PDFs (not source, not to be committed)
 backend/data/
 

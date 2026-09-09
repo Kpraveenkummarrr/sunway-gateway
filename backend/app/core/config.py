@@ -29,6 +29,26 @@ class Settings(BaseSettings):
     asterisk_ari_port: int = 8088
     asterisk_ari_username: str = ""
     asterisk_ari_password: str = ""
+    # Base ARI URL. Left blank by default and constructed from
+    # asterisk_host/asterisk_ari_port (http://<host>:<port>/ari) — override
+    # only if ARI is reachable at a different address than plain SIP.
+    asterisk_ari_url: str = ""
+    asterisk_ari_app: str = "ai-agent"  # Stasis application name
+
+    # Where Asterisk writes ARI-triggered recordings (MixMonitor's spool
+    # dir from Phase 3, reused here — see asterisk/etc/dialplan/ai_agent.conf).
+    # The backend reads recorded caller audio directly from this path
+    # rather than over the ARI recording-download API, since both run on
+    # the same host in this deployment.
+    asterisk_recording_spool_path: str = "/var/spool/asterisk/recording"
+
+    # --- AI phone call test path (Phase 6) ---
+    ai_test_extension: str = "700"
+    ai_call_timeout_seconds: int = 120  # hard cap on one AI call's total duration
+    ai_audio_timeout_seconds: int = 8  # max silence before ending the caller's turn
+    ai_welcome_message: str = (
+        "Hello, thank you for calling. Please ask your question after the tone."
+    )
 
     # SMG4004 — REQUIRES PHYSICAL GATEWAY. Kept as plain placeholders; no
     # behavior in this codebase may assume these are populated or correct.
@@ -97,6 +117,11 @@ class Settings(BaseSettings):
     ivr_max_retries: int = 3
 
     wireguard_interface: str = "wg0"
+
+    def resolved_ari_url(self) -> str:
+        if self.asterisk_ari_url:
+            return self.asterisk_ari_url.rstrip("/")
+        return f"http://{self.asterisk_host}:{self.asterisk_ari_port}/ari"
 
 
 @lru_cache

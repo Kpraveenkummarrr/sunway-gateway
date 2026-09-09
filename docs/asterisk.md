@@ -1,4 +1,4 @@
-# Asterisk / PJSIP Setup and Testing (Phase 3)
+# Asterisk / PJSIP Setup and Testing (Phase 3 + ARI/AI call control, Phase 6)
 
 Status: **READY WITHOUT GATEWAY**. Everything in this document works with
 SIP softphones only — no SMG4004 hardware involved. GSM-specific behavior
@@ -21,9 +21,14 @@ asterisk/
       internal.conf               extension-to-extension calls + IVR test entry point
       ivr.conf                   the IVR menu
       recording.conf              shared MixMonitor subroutine
+      ai_agent.conf                extension 700 -> Stasis(ai-agent) (Phase 6)
     rtp.conf                     RTP port range
+    http.conf                    Asterisk's HTTP server, localhost-only (Phase 6, for ARI)
+    ari.conf.example             ARI credential template (safe to commit)
+    ari.conf                     real ARI credentials (gitignored, generated locally)
   scripts/
     generate_sip_secrets.sh      generates pjsip_auth.conf with random passwords
+    generate_ari_secret.sh       generates ari.conf with a random ARI password
     deploy.sh                    backs up /etc/asterisk, then deploys the above
 ```
 
@@ -157,10 +162,11 @@ placeholder passwords only.
 - Only UDP 5060 (SIP) and the RTP range (10000-20000/udp) need to be
   reachable by softphones on the local network; nothing else in this repo
   opens ports.
-- Asterisk's AMI (`manager.conf`) and ARI (`ari.conf`) are left at their
-  package defaults, which are **not** enabled for external/anonymous
-  access out of the box. Phase 3 does not enable or configure either —
-  they'll be scoped and secured explicitly when the AI backend needs them.
+- Asterisk's AMI (`manager.conf`) is left at its package default, which is
+  **not** enabled for external/anonymous access — not used by this
+  project (ARI was sufficient for Phase 6's call control; see below).
+- ARI (`ari.conf`) is configured as of Phase 6 — see "ARI / AI call
+  control" below for how it's scoped and secured.
 - No default/blank SIP passwords are used; each extension gets a random
   generated credential.
 - On a real deployment, restrict UDP 5060 and the RTP range at the
@@ -231,9 +237,140 @@ whoever picks this up next without needing SIPp/CLI tricks — are:
 5. Check `/var/spool/asterisk/recordings/YYYY/MM/DD/` for a `.wav` file
    per call after hangup.
 
+## ARI / AI call control (Phase 6)
+
+Status: **READY WITHOUT GATEWAY**. Builds on the Phase 3 telephony
+foundation above; adds Asterisk's REST Interface (ARI) so the Python
+backend can control AI test calls, and reuses the Phase 5 conversation
+service unmodified. Full architecture: [docs/architecture.md](architecture.md#asterisk-ai-call-control-phase-6).
+
+### Setup
+
+```bash
+# 1. Enable Asterisk's HTTP server (ARI rides on it), bound to localhost only
+#    — asterisk/etc/http.conf is deployed by deploy.sh, but bindaddr/enabled
+#    changes need a full restart to take effect, not just a reload:
+sudo systemctl restart asterisk
+
+# 2. Generate the ARI user's password (once)
+cd asterisk/scripts
+./generate_ari_secret.sh   # creates ari.conf, gitignored; prints the password once
+
+# 3. Deploy (also copies ai_agent.conf, http.conf, ari.conf)
+sudo ./deploy.sh
+
+# 4. Verify ARI is up and auth works
+asterisk -rx "http show status"      # should show "Server Enabled and Bound to 127.0.0.1:8088"
+curl -u ai-agent:<password> http://127.0.0.1:8088/ari/asterisk/info
+curl http://127.0.0.1:8088/ari/asterisk/info   # no auth -> 401, confirms it's not open
+```
+
+Copy the printed password into `backend/.env` as `ASTERISK_ARI_PASSWORD`
+(never commit it — `ari.conf` is gitignored, matching `pjsip_auth.conf`'s
+pattern).
+
+### Running the AI call controller
+
+The controller (`backend/app/services/call_controller.py`) holds a
+long-lived ARI WebSocket connection, so it runs as its **own process**,
+separate from `uvicorn`:
+
+```bash
+cd backend
+python -m app.ai_call_worker
+```
+
+It fails fast at startup if `ASTERISK_ARI_USERNAME`/`ASTERISK_ARI_PASSWORD`
+or any of `STT_PROVIDER`/`LLM_PROVIDER`/`TTS_PROVIDER`/`RAG_EMBEDDING_PROVIDER`
+aren't configured (mock or real) — same fail-loudly policy as the HTTP API.
+
+**Note on this dev environment specifically**: Asterisk runs inside WSL2
+Ubuntu while the rest of this project's Windows-side `.venv` runs on the
+Windows host. `app/ai_call_worker.py` needs to run on the *same* host as
+Asterisk (it reads recorded audio files directly off Asterisk's local
+disk — see below), so for local testing it runs from a separate Python
+venv **inside WSL** (`/opt/sunway-ai-worker/venv`, with `app/` symlinked
+to this repo's `backend/app/` so code changes apply immediately). On the
+real target deployment (single Ubuntu VPS running everything), this
+split doesn't exist — the worker just runs alongside `uvicorn` on the
+same host.
+
+### Test extension
+
+Dial `AI_TEST_EXTENSION` (default `700`) from any registered softphone,
+or from the Asterisk CLI without a phone at all:
+
+```bash
+asterisk -rx "channel originate Local/700@internal application Wait 15"
+```
+
+This enters `Stasis(ai-agent)`, handing the channel to the running
+`ai_call_worker.py`. Without a worker process connected, `Stasis()`
+fails immediately and the caller hears a goodbye message instead of dead
+air (see `ai_agent.conf`).
+
+### What was verified live (against the real WSL Asterisk instance)
+
+| Check | Result |
+|---|---|
+| ARI authentication succeeds with correct credentials | PASS — `200` from `/ari/asterisk/info` |
+| ARI rejects no credentials | PASS — `401` |
+| ARI rejects wrong credentials | PASS — `401` |
+| Call reaches Asterisk, StasisStart fires, `ai-agent` app registers | PASS |
+| Channel is answered | PASS |
+| `calls` row created (asterisk_channel_id, ai_handled=true, started_at) | PASS |
+| `ai_sessions` row created and linked via `call_id` | PASS |
+| Welcome message "played" (tone, since TTS is mock) | PASS — confirmed via ARI Playback returning 201 |
+| Recording starts | PASS (after fixing two real bugs — see below) |
+| Caller hangup ends the call cleanly | PASS — `calls.status="completed"`, `hangup_cause="caller_hangup"`, `ended_at` set |
+| Two concurrent calls stay isolated | PASS — two distinct `calls`/`ai_sessions` rows, independent hangup, confirmed via DB query |
+| Existing 1001/1002/1003/IVR/600/recording still work | PASS — rechecked after deploying this phase's config |
+
+Two real bugs were found and fixed during this live testing (not
+theoretical — both reproduced against the actual Asterisk instance):
+
+1. **ARI's `record()` `name` parameter can't contain `/`.** Asterisk does
+   not create subdirectories for it — using a "namespaced" name like
+   `ai-agent/<session>/<n>` failed with `Unrecognized recording error: No
+   such file or directory`. Fixed by flattening the name to
+   `ai-agent__<session>__<n>`.
+2. **`/var/spool/asterisk/recording` (ARI's recording directory) doesn't
+   exist by default** and Asterisk doesn't create it either — same error
+   as above, different cause. `deploy.sh` now creates it (mode `750`,
+   owned by `asterisk`), the same way Phase 3 already did for the
+   separate `/var/spool/asterisk/recordings` (MixMonitor) directory.
+
+A third, smaller finding: this environment's `asterisk-core-sounds-en`
+package ships no actual audio files (confirmed: `Playback failed for
+sound:beep`, and the sounds directory is empty) — so the welcome/tone
+playback uses `tone:record` (an `indications.conf` tone, always
+available, no sound file dependency) rather than a `sound:` URI.
+
+### What was verified with automated (non-live) tests
+
+`backend/tests/test_call_controller.py` — 8 tests using a fake ARI
+client (`tests/fake_ari.py`, no real Asterisk needed) so the event
+handling itself is deterministic and fast: session/call creation and
+mapping, welcome + first recording, a full turn (transcribe → RAG →
+LLM → store), clean hangup, **two fully concurrent calls with isolation
+assertions**, answer-failure cleanup, LLM-failure safe-error handling
+without killing the call, and STT-failure (malformed audio) handling.
+
+### Known limitations (see also docs/architecture.md)
+
+No real audio (a softphone actually speaking, or a real STT/LLM/TTS
+provider) was tested — only the call-control mechanics (with mock
+providers and CLI-originated test calls) and the orchestration logic
+(with a fake ARI client). Silence-based turn-taking couldn't be observed
+triggering naturally in this environment (`Local` test channels generate
+no real RTP audio for Asterisk's silence detector to evaluate) — turn
+completion in the live test was hangup/timeout-driven instead. No
+barge-in/interruption support. Not real-time streaming — each turn is a
+discrete record-then-process-then-play cycle.
+
 ## REQUIRES PHYSICAL SMG4004
 
-Not implemented or tested in Phase 3, and not claimed to work:
+Not implemented or tested (Phase 3 or Phase 6), and not claimed to work:
 
 - GSM → SIP inbound calls
 - SIP → GSM outbound calls (staff/mobile routing)

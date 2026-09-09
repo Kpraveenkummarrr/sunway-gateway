@@ -9,6 +9,7 @@ ASTERISK_ETC=/etc/asterisk
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ETC="$SCRIPT_DIR/../etc"
 RECORDING_DIR=/var/spool/asterisk/recordings
+ARI_RECORDING_DIR=/var/spool/asterisk/recording
 
 if [ "$(id -u)" -ne 0 ]; then
     echo "Run as root (sudo ./deploy.sh) — needs to write to $ASTERISK_ETC." >&2
@@ -22,6 +23,11 @@ fi
 
 if [ ! -f "$REPO_ETC/pjsip/pjsip_auth.conf" ]; then
     echo "Missing $REPO_ETC/pjsip/pjsip_auth.conf — run generate_sip_secrets.sh first." >&2
+    exit 1
+fi
+
+if [ ! -f "$REPO_ETC/ari.conf" ]; then
+    echo "Missing $REPO_ETC/ari.conf — run generate_ari_secret.sh first." >&2
     exit 1
 fi
 
@@ -43,6 +49,13 @@ cp "$REPO_ETC"/dialplan/extensions.conf "$ASTERISK_ETC/extensions.conf"
 cp "$REPO_ETC"/dialplan/internal.conf "$ASTERISK_ETC/internal.conf"
 cp "$REPO_ETC"/dialplan/ivr.conf "$ASTERISK_ETC/ivr.conf"
 cp "$REPO_ETC"/dialplan/recording.conf "$ASTERISK_ETC/recording.conf"
+cp "$REPO_ETC"/dialplan/ai_agent.conf "$ASTERISK_ETC/ai_agent.conf"
+
+echo "Deploying ARI config (http.conf, ari.conf)..."
+cp "$REPO_ETC"/http.conf "$ASTERISK_ETC/http.conf"
+cp "$REPO_ETC"/ari.conf "$ASTERISK_ETC/ari.conf"
+chmod 640 "$ASTERISK_ETC/ari.conf"
+chown root:asterisk "$ASTERISK_ETC/ari.conf" 2>/dev/null || true
 
 echo "Deploying rtp.conf..."
 cp "$REPO_ETC"/rtp.conf "$ASTERISK_ETC/rtp.conf"
@@ -64,10 +77,27 @@ mkdir -p "$RECORDING_DIR"
 chown -R asterisk:asterisk "$RECORDING_DIR" 2>/dev/null || true
 chmod 750 "$RECORDING_DIR"
 
+# Asterisk does NOT auto-create this directory (confirmed live: ARI's
+# record() fails with "Unrecognized recording error: No such file or
+# directory" otherwise) — it's where ARI-triggered recordings (the AI
+# call controller's caller-turn capture) are written.
+echo "Setting up ARI recording directory ($ARI_RECORDING_DIR)..."
+mkdir -p "$ARI_RECORDING_DIR"
+chown -R asterisk:asterisk "$ARI_RECORDING_DIR" 2>/dev/null || true
+chmod 750 "$ARI_RECORDING_DIR"
+
 echo "Reloading Asterisk..."
 asterisk -rx "module reload res_pjsip.so" || true
 asterisk -rx "dialplan reload" || true
 asterisk -rx "pjsip reload" || true
 asterisk -rx "logger reload" || true
+asterisk -rx "module reload res_http_websocket.so" || true
+asterisk -rx "module reload res_ari.so" || true
+asterisk -rx "module reload res_stasis.so" || true
+# http.conf bind address/port changes need a full module reload of the
+# HTTP server itself; if ARI doesn't come up after this, restart Asterisk
+# (`systemctl restart asterisk`) — bindaddr changes aren't always picked
+# up by a live reload.
+asterisk -rx "module reload res_http.so" || true
 
 echo "Done. Verify with: asterisk -rx 'pjsip show endpoints' and 'dialplan show internal'"

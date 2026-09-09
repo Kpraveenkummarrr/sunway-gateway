@@ -7,7 +7,7 @@ AI voice agent that answers caller questions using a PDF/knowledge base
 
 ## Status
 
-Project is at **Phase 5 (AI conversation orchestration)**. See
+Project is at **Phase 6 (Asterisk AI call control via ARI)**. See
 [docs/architecture.md](docs/architecture.md) for the target architecture,
 [docs/asterisk.md](docs/asterisk.md) for the Asterisk/PJSIP/IVR setup and
 test results, and
@@ -225,6 +225,38 @@ Verify:
 ```bash
 sudo asterisk -rx "pjsip show endpoints"
 sudo asterisk -rx "dialplan show internal"
+```
+
+## Asterisk AI call control (Phase 6)
+
+ARI-based call control connecting Asterisk to the Phase 5 conversation
+service — no SMG4004/GSM involved yet, tested via a dedicated extension
+(`700`) and Asterisk CLI/SIP test calls. Full details, live test results,
+and known limitations: [docs/asterisk.md](docs/asterisk.md#ari--ai-call-control-phase-6).
+
+```bash
+# Enable ARI (needs a full restart, not just a reload, for http.conf changes)
+sudo systemctl restart asterisk
+
+cd asterisk/scripts
+./generate_ari_secret.sh    # generates the ARI user's password, gitignored
+sudo ./deploy.sh            # deploys ari.conf, http.conf, the ai_agent.conf dialplan
+
+# Run the call controller (separate long-lived process, not part of uvicorn)
+cd backend
+python -m app.ai_call_worker
+```
+
+Test without a phone: `asterisk -rx "channel originate Local/700@internal application Wait 15"`
+while the worker above is running, then check the `calls`/`ai_sessions`
+tables for the resulting row.
+
+Tests (`test_call_controller.py`, using a fake ARI client — no live
+Asterisk needed):
+
+```bash
+cd backend
+./.venv/Scripts/python.exe -m pytest tests/test_call_controller.py -v
 ```
 
 ## Important note on the gateway

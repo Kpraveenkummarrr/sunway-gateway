@@ -26,18 +26,22 @@ Asterisk (PJSIP)                        [READY WITHOUT GATEWAY — implemented a
    |       v
    |    Staff mobile (via SMG4004 outbound GSM channel)       [REQUIRES PHYSICAL SMG4004]
    |
-   +--> AI Voice Agent (FastAPI backend)  [READY WITHOUT GATEWAY]
+   +--> ARI ("ai-agent" Stasis app)     [READY WITHOUT GATEWAY — implemented and tested
+   |                                      live via ARI + Asterisk CLI, see below]
+   +--> AI Call Controller (app/services/call_controller.py)
            |
-           +--> STT (provider abstraction)                       [READY — abstraction + mock tested;
-           |                                                       real provider untested, no credentials]
-           +--> RAG (PostgreSQL + pgvector, PDF knowledge base)   [READY WITHOUT GATEWAY —
-           |                                                       implemented and tested, see below]
-           +--> LLM (provider abstraction, grounded answers only) [READY — abstraction + mock tested;
-           |                                                       real provider untested, no credentials]
-           +--> TTS (provider abstraction)                       [READY — abstraction + mock tested;
-           |                                                       real provider untested, no credentials]
-           |
-           +--> Escalate to staff routing if low-confidence / requested   [NOT YET IMPLEMENTED]
+           +--> Conversation Service (Phase 5, reused unmodified)
+                   |
+                   +--> STT (provider abstraction)                       [READY — abstraction + mock tested;
+                   |                                                       real provider untested, no credentials]
+                   +--> RAG (PostgreSQL + pgvector, PDF knowledge base)   [READY WITHOUT GATEWAY —
+                   |                                                       implemented and tested, see below]
+                   +--> LLM (provider abstraction, grounded answers only) [READY — abstraction + mock tested;
+                   |                                                       real provider untested, no credentials]
+                   +--> TTS (provider abstraction)                       [READY — abstraction + mock tested;
+                   |                                                       real provider untested, no credentials]
+                   |
+                   +--> Escalate to staff routing if low-confidence / requested   [NOT YET IMPLEMENTED]
 ```
 
 ## AI conversation orchestration (Phase 5)
@@ -101,10 +105,113 @@ these sessions aren't attached to a phone call yet. All message
 reads/writes are scoped by `session_id` — verified with a dedicated
 cross-session-isolation test.
 
-**NOT YET**: real-time audio streaming, Asterisk/ARI/AMI call control, RTP
-audio bridging, GSM/SMG4004 integration, production voice calling, staff
-escalation logic. This phase is the orchestration layer and its
-text/file-based test harness only.
+**NOT YET (as of Phase 5)**: Asterisk/ARI call control (added in Phase 6,
+below), real-time audio streaming, GSM/SMG4004 integration, production
+voice calling, staff escalation logic.
+
+## Asterisk AI call control (Phase 6)
+
+Status: **READY WITHOUT GATEWAY** — implemented and verified live against
+the real WSL Asterisk instance (ARI auth, call answer, welcome tone,
+recording, a full turn, hangup, and two-concurrent-call isolation). No
+SMG4004/GSM involvement; no real-time bidirectional audio streaming
+(explicitly out of scope this phase — see "Known limitations" below).
+
+```
+SIP call to extension 700 (AI_TEST_EXTENSION)
+   |
+   v
+Asterisk dialplan (asterisk/etc/dialplan/ai_agent.conf)
+   |  Stasis(ai-agent) — hands the channel to ARI, does nothing else
+   v
+ARI ("ai-agent" Stasis app, localhost:8088 only — never public)
+   |
+   v
+AI Call Controller (app/services/call_controller.py, run via
+   |  app/ai_call_worker.py — a standalone process, not part of the
+   |  FastAPI web server, since it holds a long-lived ARI WebSocket)
+   |
+   |  On StasisStart:
+   |    - creates a `calls` row (asterisk_channel_id, direction, caller
+   |      number, ai_handled=true) and an `ai_sessions` row linked to it
+   |      (reuses the existing Phase 2 tables — no new tables needed)
+   |    - answers the channel, plays a configurable welcome message
+   |      (AI_WELCOME_MESSAGE), starts recording the caller's turn
+   |
+   |  On RecordingFinished (one caller turn):
+   |    - reads the recorded file from ASTERISK_RECORDING_SPOOL_PATH
+   |    - calls the Phase 5 conversation service (handle_text_turn, via
+   |      STT first) UNMODIFIED — no AI logic lives in the call controller
+   |    - synthesizes the reply, plays it back, starts the next recording
+   |
+   |  On hangup (from either party) or call-timeout:
+   |    - marks the `ai_sessions`/`calls` rows completed/failed with an
+   |      end timestamp and cause, hangs up the channel if still up
+   v
+Caller hears the reply, loop repeats until hangup
+```
+
+**Call/session mapping**: reuses the existing `calls` + `ai_sessions`
+tables exactly as originally designed (`ai_sessions.call_id` FK) — no
+migration needed this phase. The controller keeps a small in-memory
+`channel_id -> (call row id, session id)` map only for the duration of
+each active call (`CallState`); the database remains the durable source
+of truth, so state is inspectable and correct even if the map is empty
+(e.g. right after a restart — in-flight calls from before a restart just
+won't be found and will hang up cleanly if AI events reference them).
+
+**Session isolation under concurrency**: every call gets its own `calls`
++ `ai_sessions` row and its own `CallState` keyed by Asterisk channel id
+— never a shared/global variable. Verified two ways: a fully deterministic
+automated test (`tests/test_call_controller.py::test_two_concurrent_calls_are_fully_isolated`,
+using a fake ARI client) and a **live** test — two simultaneous
+`channel originate` calls into extension 700 against the real Asterisk
+instance, confirmed as two distinct `calls` rows with independent
+histories and independent hangups.
+
+**TEST MODE vs PRODUCTION MEDIA MODE**: when `TTS_PROVIDER=mock`, the
+"synthesized audio" is placeholder bytes Asterisk can't play as speech —
+the controller plays a short `tone:record` cue (an indications.conf tone,
+no sound file needed) instead, so the ARI Playback call itself is still
+exercised, and logs the text that would have been spoken. This is not a
+silent fallback from a *configured* real provider — `TTS_PROVIDER` is
+never swapped; only how already-mock output is handled downstream
+differs. With `TTS_PROVIDER=openai` configured, the controller writes
+the real synthesized audio to disk and plays it by reference instead.
+
+**ARI security**: HTTP server (`asterisk/etc/http.conf`) bound to
+`127.0.0.1:8088` only — never exposed publicly. Dedicated `ai-agent` ARI
+user (`asterisk/etc/ari.conf`, gitignored, generated by
+`asterisk/scripts/generate_ari_secret.sh`) scoped to nothing but this one
+Stasis app. No AMI was added — ARI alone was sufficient, as expected.
+
+**Existing IVR untouched**: extension 700 was added as a new file
+(`ai_agent.conf`) included into the existing `[internal]` context — the
+1001/1002/1003 test extensions, the DTMF IVR at extension 600, and call
+recording all remain exactly as Phase 3 left them (verified by rerunning
+the Phase 3 checks after deploying this phase's config).
+
+**Known limitations** (all explicitly NOT claimed as working):
+
+- **No real bidirectional audio tested end-to-end.** The full
+  record → STT → RAG → LLM → TTS → playback loop's *mechanics* are
+  verified (live: answer/play/record/hangup all succeed against real
+  Asterisk; automated: the full loop with a fake ARI client and real
+  audio-shaped bytes). But no *real* audio (a softphone or SIPp actually
+  speaking) was fed through it, and no real STT/LLM/TTS provider was
+  called — no working credentials were available (see the Phase 6
+  report). `Local` test channels (used for the live verification) don't
+  generate real RTP audio, so Asterisk's silence-based turn-taking
+  (`maxSilenceSeconds`) couldn't be observed triggering naturally in this
+  environment — it's configured correctly and ARI accepted it, but only
+  hangup/timeout-driven turn completion was actually observed live.
+- **No barge-in / interruption support.** The caller cannot interrupt
+  playback; if they hang up mid-playback, the controller detects it via
+  the hangup event and cleans up rather than leaving a stuck recording,
+  but doesn't stop the audio mid-sentence. A later phase, per the brief.
+- **Real-time streaming is not implemented.** Each turn is a discrete
+  record-then-process-then-play cycle (matches Phase 5's file/buffer-based
+  design intentionally) — not continuous/low-latency audio.
 
 ## RAG / knowledge ingestion pipeline (Phase 4)
 
@@ -195,3 +302,18 @@ The following must be confirmed against Synway's official SMG4004 documentation/
 6. NAT/keepalive requirements for the SIP trunk.
 
 Until verified, these are implemented as configurable placeholders only — never hard-coded assumptions.
+
+The following remain **explicitly NOT TESTED** until the physical
+SMG4004 is available — none of this is claimed to work, regardless of
+how complete the Asterisk/ARI/AI layers above are:
+
+- GSM → SIP inbound call handling
+- SIP → GSM outbound call handling
+- SIM slot / GSM channel mapping
+- Real GSM caller ID behavior
+- GSM-path DTMF behavior
+- GSM audio quality and echo behavior
+- GSM codec behavior/transcoding
+- Multi-SIM concurrency
+- Gateway registration behavior
+- Gateway-specific SIP headers/settings

@@ -1,0 +1,23 @@
+; ==============================================================================
+; ARI (Asterisk REST Interface) — TEMPLATE ONLY. Never commit real credentials.
+;
+; Copy this file to ari.conf (gitignored) and set a real password, or run
+; asterisk/scripts/generate_ari_secret.sh to generate one automatically.
+;
+; Security:
+;   - ARI rides on Asterisk's built-in HTTP server (see http.conf), which
+;     this project binds to 127.0.0.1 only — never expose it publicly.
+;   - This user is scoped to exactly the "ai-agent" Stasis app; it has no
+;     use outside the AI call controller.
+; ==============================================================================
+
+[general]
+enabled = yes
+pretty = no
+allowed_origins =
+
+[ai-agent]
+type = user
+read_only = no
+password = CHANGE_ME
+password_format = plain
