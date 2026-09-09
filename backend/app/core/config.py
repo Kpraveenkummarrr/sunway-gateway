@@ -96,6 +96,16 @@ class Settings(BaseSettings):
     )
     ai_max_context_chars: int = 2000
     ai_max_history_messages: int = 20
+    # Overall cap on one conversation turn (embed + RAG search + LLM, or
+    # STT + that + TTS for an audio turn) — belt-and-suspenders on top of
+    # each individual provider's own PROVIDER_TIMEOUT_SECONDS, in case a
+    # sequence of calls that are each individually fast still adds up.
+    ai_turn_timeout_seconds: float = 45.0
+    # How many consecutive "bad" turns (silence/too-short audio, STT
+    # failure, or an LLM/embedding provider failure) a single call
+    # tolerates before it gives up and ends the call gracefully, rather
+    # than looping forever.
+    ai_max_consecutive_failures: int = 3
 
     rag_embedding_provider: str = ""  # "" | "mock" | "openai"
     rag_embedding_api_key: str = ""

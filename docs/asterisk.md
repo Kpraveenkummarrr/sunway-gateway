@@ -1,4 +1,4 @@
-# Asterisk / PJSIP Setup and Testing (Phase 3 + ARI/AI call control, Phase 6)
+# Asterisk / PJSIP Setup and Testing (Phase 3, ARI/AI call control Phase 6, real audio Phase 7)
 
 Status: **READY WITHOUT GATEWAY**. Everything in this document works with
 SIP softphones only — no SMG4004 hardware involved. GSM-specific behavior
@@ -343,8 +343,13 @@ theoretical — both reproduced against the actual Asterisk instance):
 A third, smaller finding: this environment's `asterisk-core-sounds-en`
 package ships no actual audio files (confirmed: `Playback failed for
 sound:beep`, and the sounds directory is empty) — so the welcome/tone
-playback uses `tone:record` (an `indications.conf` tone, always
-available, no sound file dependency) rather than a `sound:` URI.
+playback uses a `sound:` URI pointing at a WAV file the controller writes
+itself, rather than a built-in sound. **Phase 7 update**: this originally
+used `tone:record` (an indications.conf tone) instead, but that turned
+out to have an ~15s silence tail baked into its cadence, making ARI
+Playback take ~15s to report completion for what was meant to be a quick
+beep — see docs/architecture.md#real-audio--real-provider-integration-phase-7
+for the fix (a real, short, generated WAV beep).
 
 ### What was verified with automated (non-live) tests
 
@@ -356,21 +361,52 @@ LLM → store), clean hangup, **two fully concurrent calls with isolation
 assertions**, answer-failure cleanup, LLM-failure safe-error handling
 without killing the call, and STT-failure (malformed audio) handling.
 
-### Known limitations (see also docs/architecture.md)
+### Known limitations as of Phase 6 (updated by Phase 7 below)
 
-No real audio (a softphone actually speaking, or a real STT/LLM/TTS
-provider) was tested — only the call-control mechanics (with mock
-providers and CLI-originated test calls) and the orchestration logic
-(with a fake ARI client). Silence-based turn-taking couldn't be observed
-triggering naturally in this environment (`Local` test channels generate
-no real RTP audio for Asterisk's silence detector to evaluate) — turn
-completion in the live test was hangup/timeout-driven instead. No
-barge-in/interruption support. Not real-time streaming — each turn is a
-discrete record-then-process-then-play cycle.
+At the time Phase 6 shipped, no real audio (a softphone actually
+speaking) had been fed through the pipeline — `Local` test channels
+generate no real RTP audio. Phase 7 closed part of this gap; see below.
+
+## Real audio + provider verification (Phase 7)
+
+Builds on Phase 6 without touching PJSIP/IVR/recording. Full details:
+[docs/architecture.md](architecture.md#real-audio--real-provider-integration-phase-7).
+
+### Real audio, verified live
+
+Since `Local` channels driven by `application Wait` don't generate real
+RTP audio, this phase used Asterisk's built-in **`Milliwatt`** app (a
+continuous 1004Hz test tone generator) as the "caller" side instead:
+
+```bash
+asterisk -rx "channel originate Local/700@internal application Milliwatt"
+```
+
+This produces genuine, continuously-flowing audio for the AI-facing leg
+to record — proving the record → read → analyze path against **real**
+Asterisk output, not just synthetic test fixtures. Confirmed: the
+resulting recording was exactly 8kHz/mono/16-bit PCM (matching the
+documented format map), correctly identified as non-silent by
+`app.services.audio.is_effectively_silent`, and correctly rejected by
+the mock STT provider (which expects UTF-8 text, not real audio bytes) —
+exercising the same safe-error/retry path a real STT failure would.
+
+Two bugs were found and fixed via this live testing — see
+docs/architecture.md for details: the mock-mode "tone" cue's ~15s
+cadence issue, and the playback-then-record ordering fix that made this
+testing possible in the first place (recording now only starts after
+`PlaybackFinished`, not immediately after the Playback request is
+accepted).
+
+**Still not tested live**: `maxSilenceSeconds`-driven turn completion
+(Milliwatt is continuous, so it never triggers), and any real STT/LLM/TTS
+vendor call — no working API credentials were available. See
+`tests/test_real_provider_integration.py` for the ready-to-run, opt-in,
+explicit-approval-gated verification once credentials exist.
 
 ## REQUIRES PHYSICAL SMG4004
 
-Not implemented or tested (Phase 3 or Phase 6), and not claimed to work:
+Not implemented or tested (Phase 3, 6, or 7), and not claimed to work:
 
 - GSM → SIP inbound calls
 - SIP → GSM outbound calls (staff/mobile routing)

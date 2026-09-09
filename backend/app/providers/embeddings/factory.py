@@ -27,6 +27,7 @@ def get_embedding_provider(settings: Settings) -> EmbeddingProvider:
             api_key=settings.rag_embedding_api_key,
             model=settings.rag_embedding_model or "text-embedding-3-small",
             dimensions=settings.rag_embedding_dimensions,
+            timeout_seconds=settings.provider_timeout_seconds,
         )
 
     raise EmbeddingProviderError(

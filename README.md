@@ -7,7 +7,7 @@ AI voice agent that answers caller questions using a PDF/knowledge base
 
 ## Status
 
-Project is at **Phase 6 (Asterisk AI call control via ARI)**. See
+Project is at **Phase 7 (real audio + real provider integration, opt-in)**. See
 [docs/architecture.md](docs/architecture.md) for the target architecture,
 [docs/asterisk.md](docs/asterisk.md) for the Asterisk/PJSIP/IVR setup and
 test results, and
@@ -258,6 +258,39 @@ Asterisk needed):
 cd backend
 ./.venv/Scripts/python.exe -m pytest tests/test_call_controller.py -v
 ```
+
+## Real audio + real provider integration (Phase 7)
+
+Moves from mock-only media to real audio: format normalization/validation
+(`app/services/audio.py`), silence/too-short filtering, a
+consecutive-failure cap, playback-completion waiting, and explicit
+per-stage timeouts. Full details, the live Milliwatt-based audio test,
+and known limitations:
+[docs/architecture.md](docs/architecture.md#real-audio--real-provider-integration-phase-7).
+
+**No real STT/LLM/TTS vendor call has been made** — no working API
+credentials exist in this environment. Structural correctness (parameter
+passing, error handling, timeouts, response parsing) is verified instead
+via a fake OpenAI SDK client — zero network calls, zero cost:
+
+```bash
+cd backend
+./.venv/Scripts/python.exe -m pytest tests/test_openai_providers_structural.py -v
+./.venv/Scripts/python.exe -m pytest tests/test_audio.py -v
+```
+
+**Once real credentials are available**, run the minimal controlled
+verification (four real API calls total: TTS → STT → embedding → LLM) —
+opt-in only, and only with your explicit approval before running it:
+
+```bash
+REAL_PROVIDER_TESTS=1 ./.venv/Scripts/python.exe -m pytest tests/test_real_provider_integration.py -v
+```
+
+This requires `STT_PROVIDER`, `LLM_PROVIDER`, and `TTS_PROVIDER` all set
+to `openai` with matching `*_API_KEY` values — otherwise the test skips
+itself with a clear message rather than running against a partial
+configuration.
 
 ## Important note on the gateway
 

@@ -171,13 +171,15 @@ histories and independent hangups.
 
 **TEST MODE vs PRODUCTION MEDIA MODE**: when `TTS_PROVIDER=mock`, the
 "synthesized audio" is placeholder bytes Asterisk can't play as speech —
-the controller plays a short `tone:record` cue (an indications.conf tone,
-no sound file needed) instead, so the ARI Playback call itself is still
-exercised, and logs the text that would have been spoken. This is not a
-silent fallback from a *configured* real provider — `TTS_PROVIDER` is
-never swapped; only how already-mock output is handled downstream
-differs. With `TTS_PROVIDER=openai` configured, the controller writes
-the real synthesized audio to disk and plays it by reference instead.
+the controller plays a short, genuinely bounded generated beep instead
+(see Phase 7 below for why — an indications.conf tone was tried first and
+found to have an impractical ~15s cadence), so the ARI Playback call
+itself is still exercised, and logs the text that would have been
+spoken. This is not a silent fallback from a *configured* real provider —
+`TTS_PROVIDER` is never swapped; only how already-mock output is handled
+downstream differs. With `TTS_PROVIDER=openai` configured, the controller
+normalizes and writes the real synthesized audio to disk and plays it by
+reference instead (see Phase 7's audio format work).
 
 **ARI security**: HTTP server (`asterisk/etc/http.conf`) bound to
 `127.0.0.1:8088` only — never exposed publicly. Dedicated `ai-agent` ARI
@@ -191,20 +193,10 @@ Stasis app. No AMI was added — ARI alone was sufficient, as expected.
 recording all remain exactly as Phase 3 left them (verified by rerunning
 the Phase 3 checks after deploying this phase's config).
 
-**Known limitations** (all explicitly NOT claimed as working):
+**Known limitations as of Phase 6** (updated in Phase 7 below — real
+audio capture/format handling is now verified; real STT/LLM/TTS provider
+calls still are not):
 
-- **No real bidirectional audio tested end-to-end.** The full
-  record → STT → RAG → LLM → TTS → playback loop's *mechanics* are
-  verified (live: answer/play/record/hangup all succeed against real
-  Asterisk; automated: the full loop with a fake ARI client and real
-  audio-shaped bytes). But no *real* audio (a softphone or SIPp actually
-  speaking) was fed through it, and no real STT/LLM/TTS provider was
-  called — no working credentials were available (see the Phase 6
-  report). `Local` test channels (used for the live verification) don't
-  generate real RTP audio, so Asterisk's silence-based turn-taking
-  (`maxSilenceSeconds`) couldn't be observed triggering naturally in this
-  environment — it's configured correctly and ARI accepted it, but only
-  hangup/timeout-driven turn completion was actually observed live.
 - **No barge-in / interruption support.** The caller cannot interrupt
   playback; if they hang up mid-playback, the controller detects it via
   the hangup event and cleans up rather than leaving a stuck recording,
@@ -212,6 +204,158 @@ the Phase 3 checks after deploying this phase's config).
 - **Real-time streaming is not implemented.** Each turn is a discrete
   record-then-process-then-play cycle (matches Phase 5's file/buffer-based
   design intentionally) — not continuous/low-latency audio.
+
+## Real audio + real provider integration (Phase 7)
+
+Status: **READY WITHOUT GATEWAY** for audio capture/format handling and
+provider structural correctness — verified live with real Asterisk
+recordings and real (non-mock) WAV audio. **NOT verified**: any actual
+call to a real STT/LLM/TTS vendor — no working API credentials were
+available (see the Phase 7 report). No SMG4004/GSM involvement.
+
+```
+SIP Test Endpoint
+   |
+   v
+Asterisk
+   |
+   v
+ARI
+   |
+   v
+AI Call Controller
+   |
+   v
+Audio Capture (ARI record() -> WAV file, read from ASTERISK_RECORDING_SPOOL_PATH)
+   |
+   v
+Audio validation (app/services/audio.py):
+   |  - is it a readable WAV? if not, skip the format check and let STT
+   |    reject it directly (keeps the mock-STT/fake-ARI test convention working)
+   |  - too short (< 0.3s) or effectively silent (RMS below threshold)?
+   |    skip STT entirely, re-prompt instead of burning a provider call
+   v
+STT (unchanged from Phase 5/6 — audio bytes passed through as-is;
+   |  Whisper-style providers resample server-side, no conversion needed)
+   v
+RAG / pgvector (unchanged from Phase 4/5)
+   |
+   v
+LLM (unchanged from Phase 5/6)
+   |
+   v
+TTS -> normalize_for_asterisk_playback() if the output isn't already
+   |    8kHz/16kHz mono 16-bit PCM (OpenAI's 24kHz wav output isn't —
+   |    resampled with stdlib `audioop`, no new dependency)
+   v
+Asterisk Playback (by file reference; controller now waits for
+                    PlaybackFinished before starting the next recording,
+                    so the AI's own voice is never captured back into
+                    the caller's next turn)
+```
+
+### Audio format map (verified empirically, not assumed)
+
+| Stage | Format | How verified |
+|---|---|---|
+| Asterisk ARI recording (caller audio) | WAV, 8kHz, mono, 16-bit signed PCM | Live: recorded a real ~21s clip via `channel originate ... application Milliwatt`, read it back with `app.services.audio.read_wav_info` — exactly 8000Hz/1ch/16-bit, confirmed non-silent |
+| STT input | Same as above, unconverted | Whisper-family APIs accept arbitrary sample rates; no conversion applied |
+| TTS output (OpenAI, `response_format="wav"`) | WAV, 24kHz, mono, 16-bit PCM | OpenAI's documented fixed rate for that response format |
+| Asterisk playback | WAV, 8kHz **or** 16kHz mono 16-bit PCM only | `asterisk -rx "module show like format"` — `format_wav.so`'s own description: "Microsoft WAV/WAV16 format (8kHz/16kHz Signed Linear)"; 24kHz confirmed NOT playable |
+
+So exactly one real conversion is needed in this whole pipeline: TTS
+output → 8kHz mono 16-bit PCM before Asterisk can play it back
+(`normalize_for_asterisk_playback`, stdlib `wave`+`audioop` only).
+
+### What changed in the call controller (Section 12/13/14 hardening)
+
+- **Playback now waits for completion.** Previously, `_synthesize_and_play`
+  returned as soon as ARI accepted the Playback request, not when the
+  audio actually finished — the next recording could start while the
+  AI's own reply was still playing, risking Asterisk hearing/recording
+  itself. Fixed with an `asyncio.Event` per playback id, resolved by the
+  `PlaybackFinished` ARI event, with a `PROVIDER_TIMEOUT_SECONDS` timeout
+  as a safety net.
+- **Silence/too-short audio is now filtered before STT.** A turn whose
+  recording is under 0.3s or below an RMS silence threshold skips the STT
+  call entirely and just re-prompts — avoiding wasted (billed, for a real
+  provider) calls on dead air.
+- **A consecutive-failure cap (`AI_MAX_CONSECUTIVE_FAILURES`, default 3)
+  ends a call gracefully** (a goodbye message, then hangup) instead of
+  looping forever through silence/STT-failure/provider-failure turns.
+  Resets to zero on any successful turn.
+- **Explicit timeouts added where they were missing**: the embedding
+  provider had none at all (fixed — reuses `PROVIDER_TIMEOUT_SECONDS`,
+  same as STT/LLM/TTS already had); the RAG/pgvector query now has one
+  too; and a new overall `AI_TURN_TIMEOUT_SECONDS` caps the whole
+  embed+search+LLM sequence as a belt-and-suspenders on top of each
+  individual provider's own timeout. A timeout raises
+  `ConversationTimeoutError` (a `ConversationError` subclass, so existing
+  handling still works) — the HTTP API maps it to `504`, the call
+  controller plays the same safe-error message it uses for any other
+  provider failure.
+- **Concurrency: `run_forever` now dispatches each ARI event as its own
+  task** instead of awaiting them one at a time. Without this, a slow
+  provider call on one channel would block ARI event processing —
+  therefore progress — on every *other* concurrent call, since all
+  channels share one WebSocket event stream. Verified with a dedicated
+  test using a deliberately slow mock LLM on one channel racing a fast
+  one on another; per-channel state (`CallState`) was already isolated
+  (Phase 6), so this only affects *when* events are processed, not
+  correctness.
+
+### A real bug found and fixed via live testing
+
+The Phase 6 mock-TTS "tone" cue used `tone:record` (an indications.conf
+tone). Testing it live for the first time with the new
+wait-for-playback-completion logic revealed why that was a poor choice:
+`record`'s actual cadence is defined as 1400Hz for 80ms, then **~15
+seconds of silence**, per cycle — so ARI took ~15s to report
+`PlaybackFinished` for what was meant to be a quick beep, effectively
+stalling every mock-mode turn. Fixed by generating a real, short,
+correctly-formatted WAV beep in code (`make_short_beep_wav`, 0.3s, stdlib
+only) instead of relying on an indications.conf tone's timing.
+
+### Provider verification approach (no live API calls made)
+
+- **Structural tests** (`tests/test_openai_providers_structural.py`, 25
+  tests): a fake `openai.AsyncOpenAI`-shaped client
+  (`tests/fake_openai.py`) injected directly as `provider._client`, so
+  every OpenAI provider class's parameter passing, response parsing,
+  timeout handling, and error wrapping is verified — for valid input,
+  empty/invalid input, timeouts, auth failures, generic provider
+  failures, and malformed responses — with zero network calls and zero
+  cost.
+- **Real, non-cost audio fixtures** (`tests/audio_fixtures.py`): genuine
+  WAV files (silence, a sine tone, noise) — not the Phase 5/6 convention
+  of "audio bytes are just UTF-8 text" — for testing the audio
+  normalization/validation logic itself.
+- **Opt-in real-provider integration test**
+  (`tests/test_real_provider_integration.py`): the minimal controlled
+  round-trip from the brief (text → TTS → audio → STT → text → RAG →
+  LLM → reply → TTS), gated behind `REAL_PROVIDER_TESTS=1` *and* all
+  three of `STT_PROVIDER`/`LLM_PROVIDER`/`TTS_PROVIDER` being configured
+  to `openai` with matching API keys — otherwise skipped. **Not run this
+  phase**: no working API credentials were available anywhere in this
+  environment (confirmed by inspecting `backend/.env` — every
+  `*_API_KEY` is blank). No paid call was made.
+
+### Known limitations (Phase 7)
+
+- **No real STT/LLM/TTS vendor call has ever been made in this project.**
+  Everything above is verified either structurally (fake SDK client) or
+  against real Asterisk audio with mock providers. The moment real
+  credentials are available, run
+  `REAL_PROVIDER_TESTS=1 pytest tests/test_real_provider_integration.py -v`
+  for the first controlled verification, with your explicit go-ahead.
+- **Silence-based turn-taking (`maxSilenceSeconds`) still hasn't been
+  observed triggering live.** The Milliwatt-based live test used a
+  *continuous* tone (never silent), which is what proved the recording
+  format/silence-detection logic works on real Asterisk output — but by
+  construction it never lets `maxSilenceSeconds` fire either. This needs
+  a real caller (or a SIPp scenario streaming real intermittent audio) to
+  observe.
+- Barge-in and real-time streaming remain out of scope, same as Phase 6.
 
 ## RAG / knowledge ingestion pipeline (Phase 4)
 

@@ -26,6 +26,7 @@ def _make_controller(tmp_path: Path, **overrides) -> AICallController:
         rag_top_k=4,
         rag_similarity_threshold=-1.0,
         asterisk_recording_spool_path=str(tmp_path),
+        provider_timeout_seconds=2.0,  # safety net only — playback completion is signaled explicitly below
         **overrides,
     )
     ari = FakeAriClient()
@@ -37,6 +38,12 @@ def _make_controller(tmp_path: Path, **overrides) -> AICallController:
         llm_provider=MockLLMProvider(),
         stt_provider=MockSTTProvider(),
         tts_provider=MockTTSProvider(),
+    )
+    # Real Asterisk emits a PlaybackFinished event once audio actually
+    # finishes; the fake signals it right after play() so
+    # AICallController._play_and_wait doesn't block for the real timeout.
+    ari.on_play_started = lambda playback_id: controller._on_playback_finished(
+        {"playback": {"id": playback_id}}
     )
     return controller, ari
 
@@ -281,3 +288,234 @@ async def test_stt_failure_does_not_crash_call() -> None:
         assert len(ari.recorded) == 2  # loop continued
 
         await _cleanup(state.session_id, state.call_row_id)
+
+
+@pytest.mark.asyncio
+async def test_silent_recording_skips_stt_and_reprompts() -> None:
+    from tests.audio_fixtures import make_silence_wav
+
+    with tempfile.TemporaryDirectory() as tmp:
+        tmp_path = Path(tmp)
+        controller, ari = _make_controller(tmp_path)
+        channel_id = "PJSIP/700-00000008"
+
+        await controller.dispatch_event(stasis_start_event(channel_id))
+        state = controller._calls[channel_id]
+
+        recording_name = ari.recorded[-1][1]
+        path = tmp_path / f"{recording_name}.wav"
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_bytes(make_silence_wav(duration_seconds=1.0))
+        await controller.dispatch_event(recording_finished_event(recording_name))
+
+        assert channel_id in controller._calls
+        assert len(ari.recorded) == 2  # a next-turn recording was started, no STT call attempted
+
+        async with AsyncSessionLocal() as db:
+            result = await db.execute(select(AIMessage).where(AIMessage.session_id == state.session_id))
+            assert result.scalars().all() == []  # no turn was recorded — silence never reached STT
+
+        await _cleanup(state.session_id, state.call_row_id)
+
+
+@pytest.mark.asyncio
+async def test_too_short_recording_skips_stt_and_reprompts() -> None:
+    from tests.audio_fixtures import make_tone_wav
+
+    with tempfile.TemporaryDirectory() as tmp:
+        tmp_path = Path(tmp)
+        controller, ari = _make_controller(tmp_path)
+        channel_id = "PJSIP/700-00000009"
+
+        await controller.dispatch_event(stasis_start_event(channel_id))
+        state = controller._calls[channel_id]
+
+        recording_name = ari.recorded[-1][1]
+        path = tmp_path / f"{recording_name}.wav"
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_bytes(make_tone_wav(duration_seconds=0.1))  # below MIN_TURN_DURATION_SECONDS
+        await controller.dispatch_event(recording_finished_event(recording_name))
+
+        assert channel_id in controller._calls
+        assert len(ari.recorded) == 2
+
+        await _cleanup(state.session_id, state.call_row_id)
+
+
+@pytest.mark.asyncio
+async def test_consecutive_failures_end_call_gracefully() -> None:
+    from tests.audio_fixtures import make_silence_wav
+
+    with tempfile.TemporaryDirectory() as tmp:
+        tmp_path = Path(tmp)
+        controller, ari = _make_controller(tmp_path, ai_max_consecutive_failures=2)
+        channel_id = "PJSIP/700-0000000C"
+
+        await controller.dispatch_event(stasis_start_event(channel_id))
+        state = controller._calls[channel_id]
+        call_row_id, session_id = state.call_row_id, state.session_id
+
+        for _ in range(2):
+            recording_name = ari.recorded[-1][1]
+            path = tmp_path / f"{recording_name}.wav"
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_bytes(make_silence_wav(duration_seconds=1.0))
+            await controller.dispatch_event(recording_finished_event(recording_name))
+
+        # After hitting the cap (2 consecutive silent turns), the call
+        # should have ended itself gracefully rather than looping forever.
+        assert channel_id not in controller._calls
+        assert channel_id in ari.hungup
+
+        async with AsyncSessionLocal() as db:
+            call_row = await db.get(Call, call_row_id)
+            session = await db.get(AISession, session_id)
+            assert call_row.status == "completed"
+            assert call_row.hangup_cause == "too_many_failed_turns"
+            assert session.status == "completed"
+
+        await _cleanup(session_id, call_row_id)
+
+
+@pytest.mark.asyncio
+async def test_successful_turn_resets_failure_count() -> None:
+    from tests.audio_fixtures import make_silence_wav
+
+    with tempfile.TemporaryDirectory() as tmp:
+        tmp_path = Path(tmp)
+        controller, ari = _make_controller(tmp_path, ai_max_consecutive_failures=2)
+        channel_id = "PJSIP/700-0000000D"
+
+        await controller.dispatch_event(stasis_start_event(channel_id))
+        state = controller._calls[channel_id]
+
+        # One silent turn (failure 1 of 2)...
+        recording_name = ari.recorded[-1][1]
+        path = tmp_path / f"{recording_name}.wav"
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_bytes(make_silence_wav(duration_seconds=1.0))
+        await controller.dispatch_event(recording_finished_event(recording_name))
+        assert state.consecutive_failures == 1
+
+        # ...then a real, successful turn should reset the counter.
+        recording_name = ari.recorded[-1][1]
+        _write_recording(tmp_path, recording_name, "a real question")
+        await controller.dispatch_event(recording_finished_event(recording_name))
+        assert state.consecutive_failures == 0
+        assert channel_id in controller._calls  # still going, cap was never hit
+
+        await _cleanup(state.session_id, state.call_row_id)
+
+
+@pytest.mark.asyncio
+async def test_playback_completes_before_next_recording_starts() -> None:
+    """The fake ARI signals PlaybackFinished asynchronously (one event-loop
+    tick after play() is called, like real Asterisk would once audio
+    actually finishes) — if the controller started the next recording
+    without waiting for that, play() and record() calls would race in an
+    order that doesn't reflect real playback-then-record sequencing. This
+    just confirms the full turn completes cleanly with that timing in
+    play — a regression here would show up as a hang (test timeout) or a
+    missing recording, not a subtle ordering assertion.
+    """
+    with tempfile.TemporaryDirectory() as tmp:
+        tmp_path = Path(tmp)
+        controller, ari = _make_controller(tmp_path)
+        channel_id = "PJSIP/700-0000000E"
+
+        await controller.dispatch_event(stasis_start_event(channel_id))
+        state = controller._calls[channel_id]
+
+        recording_name = ari.recorded[-1][1]
+        _write_recording(tmp_path, recording_name, "what are your hours?")
+        await controller.dispatch_event(recording_finished_event(recording_name))
+
+        # Reply was played, and only after that did the next recording start.
+        assert len(ari.played) == 2  # welcome + reply
+        assert len(ari.recorded) == 2  # initial + next-turn
+
+        await _cleanup(state.session_id, state.call_row_id)
+
+
+@pytest.mark.asyncio
+async def test_slow_call_does_not_block_concurrent_call_via_run_forever() -> None:
+    """run_forever() dispatches events as independent tasks specifically
+    so a slow provider call on one channel can't stall progress on a
+    concurrent one — this proves that, using a real (slow) LLM call on
+    channel A racing a fast one on channel B."""
+    import asyncio as _asyncio
+
+    with tempfile.TemporaryDirectory() as tmp:
+        tmp_path = Path(tmp)
+        controller, ari = _make_controller(tmp_path)
+        _slow_llm_state = {"in_flight": False, "done": False}
+
+        class _SlowLLM(MockLLMProvider):
+            async def generate_response(self, **kwargs):
+                _slow_llm_state["in_flight"] = True
+                await _asyncio.sleep(3.0)
+                result = await super().generate_response(**kwargs)
+                _slow_llm_state["done"] = True
+                return result
+
+        controller._llm_provider = _SlowLLM()
+
+        runner = _asyncio.create_task(controller.run_forever())
+        try:
+            channel_slow = "PJSIP/700-SLOW"
+            channel_fast = "PJSIP/700-FAST"
+
+            await ari.push_event(stasis_start_event(channel_slow))
+            await _asyncio.wait_for(
+                _poll_until(lambda: any(c == channel_slow for c, _ in ari.recorded)), timeout=2.0
+            )
+            state_slow = controller._calls[channel_slow]
+            recording_name_slow = ari.recorded[-1][1]
+            _write_recording(tmp_path, recording_name_slow, "a slow question")
+            await ari.push_event(recording_finished_event(recording_name_slow))
+            await _asyncio.wait_for(_poll_until(lambda: _slow_llm_state["in_flight"]), timeout=2.0)
+
+            # While channel_slow's turn is still processing (its LLM call
+            # won't return for ~0.5s), channel_fast's StasisStart must still
+            # get handled — proven by relative ordering (fast channel done
+            # BEFORE the slow LLM call returns) rather than an absolute
+            # wall-clock deadline, so this isn't flaky under system load —
+            # this would time out (or complete only after the slow LLM
+            # call, failing the assertion below) if events were still
+            # processed strictly sequentially.
+            await ari.push_event(stasis_start_event(channel_fast))
+            await _asyncio.wait_for(
+                _poll_until(lambda: any(c == channel_fast for c, _ in ari.recorded)), timeout=10.0
+            )
+            assert not _slow_llm_state["done"], (
+                "channel_fast only progressed after the slow LLM call finished — "
+                "events are not being processed concurrently"
+            )
+
+            # Let the slow turn actually finish before tearing down.
+            await _asyncio.wait_for(_poll_until(lambda: _slow_llm_state["done"]), timeout=10.0)
+            await _asyncio.sleep(0.05)  # let the post-LLM DB commit land
+
+            state_fast = controller._calls[channel_fast]
+            await _cleanup(state_slow.session_id, state_slow.call_row_id)
+            await _cleanup(state_fast.session_id, state_fast.call_row_id)
+        finally:
+            await ari.stop_events()
+            runner.cancel()
+            with pytest.raises(_asyncio.CancelledError):
+                await runner
+            pending = [t for t in controller._background_tasks if not t.done()]
+            for t in pending:
+                t.cancel()
+            for t in pending:
+                try:
+                    await t
+                except BaseException:  # noqa: BLE001 - best-effort teardown, not asserting on these
+                    pass
+
+
+async def _poll_until(predicate, *, interval: float = 0.01) -> None:
+    import asyncio as _asyncio
+
+    while not predicate():
+        await _asyncio.sleep(interval)

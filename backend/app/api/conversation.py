@@ -20,6 +20,7 @@ from app.providers.tts.base import TTSProviderError
 from app.providers.tts.factory import get_tts_provider
 from app.services.conversation import (
     ConversationError,
+    ConversationTimeoutError,
     TurnResult,
     create_session,
     end_session,
@@ -152,6 +153,9 @@ async def send_text_message(
         turn = await handle_text_turn(
             db, session, body.text, settings=settings, embedding_provider=embedding_provider, llm_provider=llm_provider
         )
+    except ConversationTimeoutError as exc:
+        logger.warning("Text turn timed out for session %s: %s", session_id, exc)
+        raise HTTPException(status.HTTP_504_GATEWAY_TIMEOUT, detail="AI response took too long") from exc
     except ConversationError as exc:
         raise HTTPException(status.HTTP_400_BAD_REQUEST, detail=str(exc)) from exc
     except SearchError as exc:
@@ -195,6 +199,9 @@ async def send_audio_message(
             llm_provider=llm_provider,
             tts_provider=tts_provider,
         )
+    except ConversationTimeoutError as exc:
+        logger.warning("Audio turn timed out for session %s: %s", session_id, exc)
+        raise HTTPException(status.HTTP_504_GATEWAY_TIMEOUT, detail="AI response took too long") from exc
     except ConversationError as exc:
         raise HTTPException(status.HTTP_400_BAD_REQUEST, detail=str(exc)) from exc
     except SearchError as exc:
