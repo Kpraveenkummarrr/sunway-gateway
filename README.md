@@ -10,7 +10,9 @@ AI voice agent that answers caller questions using a PDF/knowledge base
 Project is at **Phase 7 (real audio + real provider integration, opt-in)**. See
 [docs/architecture.md](docs/architecture.md) for the target architecture,
 [docs/asterisk.md](docs/asterisk.md) for the Asterisk/PJSIP/IVR setup and
-test results, and
+test results,
+[docs/production-deployment.md](docs/production-deployment.md) for
+step-by-step setup on a real client server, and
 [docs/client-information-required.md](docs/client-information-required.md)
 for what's needed from the client before later phases can proceed.
 
@@ -36,8 +38,10 @@ backend/             FastAPI AI voice agent + admin/config API
 db/
   migrations/          Alembic migrations (calls, recordings, knowledge base, etc.)
 
-docs/                  Architecture, installation, security, troubleshooting, etc.
-scripts/               Deployment / ops scripts (backups, firewall setup, etc.)
+docs/                  Architecture, Asterisk setup, production deployment, client info needed
+scripts/               Deployment / ops scripts — see docs/production-deployment.md
+  systemd/              Unit files for the backend + AI worker services
+  setup_firewall.sh     ufw rules (SSH, SIP, RTP only)
 recordings/            Local call recordings (gitignored; not committed)
 ```
 

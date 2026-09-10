@@ -1,0 +1,20 @@
+[Unit]
+Description=Sunway Gateway AI Call Worker (Asterisk ARI)
+After=network.target asterisk.service postgresql.service
+Requires=asterisk.service
+Wants=postgresql.service
+
+[Service]
+Type=simple
+User=sunway
+Group=sunway
+WorkingDirectory=/opt/sunway-gateway/backend
+EnvironmentFile=/opt/sunway-gateway/backend/.env
+ExecStart=/opt/sunway-gateway/backend/.venv/bin/python -m app.ai_call_worker
+Restart=on-failure
+RestartSec=5
+NoNewPrivileges=true
+PrivateTmp=true
+
+[Install]
+WantedBy=multi-user.target

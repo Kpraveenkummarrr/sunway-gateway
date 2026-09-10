@@ -1,0 +1,21 @@
+[Unit]
+Description=Sunway Gateway FastAPI backend
+After=network.target postgresql.service
+Wants=postgresql.service
+
+[Service]
+Type=simple
+User=sunway
+Group=sunway
+WorkingDirectory=/opt/sunway-gateway/backend
+EnvironmentFile=/opt/sunway-gateway/backend/.env
+ExecStart=/opt/sunway-gateway/backend/.venv/bin/uvicorn app.main:app --host 127.0.0.1 --port 8000
+Restart=on-failure
+RestartSec=5
+# Hardening — safe to leave on; the app doesn't need to write outside its
+# own directories (uploaded PDFs, logs go under WorkingDirectory).
+NoNewPrivileges=true
+PrivateTmp=true
+
+[Install]
+WantedBy=multi-user.target
