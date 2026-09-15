@@ -172,7 +172,7 @@ async def handle_text_turn(
 
         llm_started = time.monotonic()
         llm_response = await llm_provider.generate_response(
-            system_prompt=settings.ai_system_prompt,
+            system_prompt=settings.system_prompt_for(session.language),
             history=llm_history,
             retrieved_context=context,
         )

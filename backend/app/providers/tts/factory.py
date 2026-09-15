@@ -27,8 +27,25 @@ def get_tts_provider(settings: Settings) -> TTSProvider:
             timeout_seconds=settings.provider_timeout_seconds,
         )
 
+    if provider_name == "bhashini":
+        from app.providers.bhashini.client import BhashiniClient
+        from app.providers.tts.bhashini_provider import BhashiniTTSProvider
+
+        if not settings.bhashini_inference_api_key:
+            raise TTSProviderError("TTS_PROVIDER=bhashini but BHASHINI_INFERENCE_API_KEY is not set")
+        return BhashiniTTSProvider(
+            client=BhashiniClient(
+                api_key=settings.bhashini_inference_api_key,
+                inference_url=settings.bhashini_inference_url,
+                timeout_seconds=settings.provider_timeout_seconds,
+            ),
+            service_id=settings.bhashini_tts_service_id,
+            gender=settings.bhashini_tts_gender,
+            language=settings.ai_language,
+        )
+
     raise TTSProviderError(
-        "No TTS provider configured. Set TTS_PROVIDER to 'openai' (with "
-        "TTS_API_KEY) for real synthesis, or 'mock' for local "
-        "development/testing only."
+        "No TTS provider configured. Set TTS_PROVIDER to 'bhashini' (with "
+        "BHASHINI_INFERENCE_API_KEY) or 'openai' (with TTS_API_KEY) for real "
+        "synthesis, or 'mock' for local development/testing only."
     )

@@ -240,26 +240,38 @@ NOT YET vs REQUIRES PHYSICAL SMG4004.
 The system runs entirely on `mock` providers out of the box — no API key
 needed, no cost, but responses are canned/deterministic, not real AI.
 
-To go live with a real provider (OpenAI is the only one implemented):
+**Hindi production (client requirement):** Bhashini for speech, OpenAI for
+the LLM.
 
-1. Install the client library: `sudo -u sunway /opt/sunway-gateway/backend/.venv/bin/pip install openai`
-2. In `backend/.env`, set `STT_PROVIDER=openai`, `LLM_PROVIDER=openai`,
-   `TTS_PROVIDER=openai`, `RAG_EMBEDDING_PROVIDER=openai`, and their
-   matching `*_API_KEY` values.
-3. Restart both services: `sudo systemctl restart sunway-backend sunway-ai-worker`
+1. Install dependencies (includes `openai` and `httpx`):
+   `sudo -u sunway /opt/sunway-gateway/backend/.venv/bin/pip install -r requirements.txt`
+2. In `backend/.env` set:
+   ```
+   AI_LANGUAGE=hi
+   STT_PROVIDER=bhashini
+   TTS_PROVIDER=bhashini
+   LLM_PROVIDER=openai
+   LLM_MODEL=gpt-4o-mini
+   LLM_API_KEY=<secret>
+   BHASHINI_INFERENCE_URL=https://dhruva-api.bhashini.gov.in/services/inference/pipeline
+   BHASHINI_INFERENCE_API_KEY=<secret>
+   BHASHINI_ASR_SERVICE_ID=ai4bharat/conformer-hi-gpu--t4
+   BHASHINI_TTS_SERVICE_ID=Bhashini/IITM/TTS
+   BHASHINI_TTS_GENDER=female
+   ```
+   and **remove** any English `AI_WELCOME_MESSAGE` line so the built-in
+   Hindi phrases are used (the worker logs a warning if one remains).
+   Keep `RAG_EMBEDDING_PROVIDER` as the knowledge base was ingested with —
+   changing embedding provider requires re-ingesting every document.
+3. Verify with real (billed, minimal) calls before restarting:
+   `cd /opt/sunway-gateway/backend && sudo -u sunway ./.venv/bin/python scripts/hindi_pipeline_smoke_test.py`
+   — every line must be `PASS`; WAVs are written to `/tmp/sunway-smoke`.
+4. Restart: `sudo systemctl restart sunway-ai-worker sunway-backend`
 
-**Before doing this for real calls**, run the minimal controlled
-verification (4 API calls total — TTS, STT, embedding, LLM) to confirm
-the integration actually works with your key:
-
-```bash
-cd /opt/sunway-gateway/backend
-REAL_PROVIDER_TESTS=1 sudo -u sunway ./.venv/bin/python -m pytest tests/test_real_provider_integration.py -v
-```
-
-This makes real, billed API calls — only run it once, deliberately, not
-as part of routine testing. See docs/architecture.md's Phase 7 section
-for what it checks.
+`mock` remains a valid value for any provider as a rollback. The older
+all-OpenAI option (`STT_PROVIDER=openai`, `TTS_PROVIDER=openai`) is still
+supported; its opt-in check is
+`REAL_PROVIDER_TESTS=1 ./.venv/bin/python -m pytest tests/test_real_provider_integration.py -v`.
 
 ## Step 10 — Upload the knowledge base
 

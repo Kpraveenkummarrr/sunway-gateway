@@ -26,8 +26,24 @@ def get_stt_provider(settings: Settings) -> STTProvider:
             timeout_seconds=settings.provider_timeout_seconds,
         )
 
+    if provider_name == "bhashini":
+        from app.providers.bhashini.client import BhashiniClient
+        from app.providers.stt.bhashini_provider import BhashiniSTTProvider
+
+        if not settings.bhashini_inference_api_key:
+            raise STTProviderError("STT_PROVIDER=bhashini but BHASHINI_INFERENCE_API_KEY is not set")
+        return BhashiniSTTProvider(
+            client=BhashiniClient(
+                api_key=settings.bhashini_inference_api_key,
+                inference_url=settings.bhashini_inference_url,
+                timeout_seconds=settings.provider_timeout_seconds,
+            ),
+            service_id=settings.bhashini_asr_service_id,
+            language=settings.ai_language,
+        )
+
     raise STTProviderError(
-        "No STT provider configured. Set STT_PROVIDER to 'openai' (with "
-        "STT_API_KEY) for real transcription, or 'mock' for local "
-        "development/testing only."
+        "No STT provider configured. Set STT_PROVIDER to 'bhashini' (with "
+        "BHASHINI_INFERENCE_API_KEY) or 'openai' (with STT_API_KEY) for real "
+        "transcription, or 'mock' for local development/testing only."
     )

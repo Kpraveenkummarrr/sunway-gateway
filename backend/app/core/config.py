@@ -2,6 +2,39 @@ from functools import lru_cache
 
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
+# Built-in caller-facing phrases, used when the matching AI_*_MESSAGE
+# setting is left empty. Keyed by AI_LANGUAGE; unknown languages fall back
+# to English. Hindi phrasing avoids gendered verb forms so it reads
+# correctly with either TTS voice.
+DEFAULT_CALLER_MESSAGES: dict[str, dict[str, str]] = {
+    "en": {
+        "welcome": "Hello, thank you for calling. Please ask your question after the tone.",
+        "error": "Sorry, I'm having trouble right now. Please try again later or contact us directly.",
+        "goodbye": "I'm having trouble understanding. Please try calling again later. Goodbye.",
+    },
+    "hi": {
+        "welcome": "नमस्ते, कॉल करने के लिए धन्यवाद। कृपया अपना प्रश्न पूछें।",
+        "error": "क्षमा करें, अभी तकनीकी समस्या आ रही है। कृपया थोड़ी देर बाद दोबारा प्रयास करें।",
+        "goodbye": "क्षमा करें, आपकी बात समझ में नहीं आ रही है। कृपया बाद में दोबारा कॉल करें। धन्यवाद।",
+    },
+}
+
+# Appended to the system prompt for sessions in these languages, so the
+# LLM never drifts into English when the transcript or knowledge base
+# context is English or code-mixed.
+LANGUAGE_POLICIES: dict[str, str] = {
+    "hi": (
+        "LANGUAGE POLICY (mandatory): Always respond only in Hindi, written in "
+        "Devanagari script. Never respond in English, even if the caller's "
+        "message, the knowledge base excerpts, or earlier messages are in "
+        "English or mix languages — convey any information you use in natural "
+        "spoken Hindi. This is a phone call and your reply will be spoken "
+        "aloud: use short, plain conversational sentences (one to three), with "
+        "no markdown, bullet points, numbered lists, headings, emojis, or "
+        "special symbols."
+    ),
+}
+
 
 class Settings(BaseSettings):
     """Application configuration, loaded from environment variables / .env.
@@ -46,9 +79,11 @@ class Settings(BaseSettings):
     ai_test_extension: str = "700"
     ai_call_timeout_seconds: int = 120  # hard cap on one AI call's total duration
     ai_audio_timeout_seconds: int = 8  # max silence before ending the caller's turn
-    ai_welcome_message: str = (
-        "Hello, thank you for calling. Please ask your question after the tone."
-    )
+    # Caller-facing phrases. Leave empty to use the built-in phrase for
+    # AI_LANGUAGE (DEFAULT_CALLER_MESSAGES); set only to override it.
+    ai_welcome_message: str = ""
+    ai_error_message: str = ""
+    ai_goodbye_message: str = ""
 
     # SMG4004 — REQUIRES PHYSICAL GATEWAY. Kept as plain placeholders; no
     # behavior in this codebase may assume these are populated or correct.
@@ -75,6 +110,14 @@ class Settings(BaseSettings):
     tts_api_key: str = ""
     tts_model: str = ""
     tts_voice: str = ""
+
+    # Bhashini (Dhruva) inference — used when STT_PROVIDER / TTS_PROVIDER
+    # is "bhashini". Service IDs are the verified Hindi production models.
+    bhashini_inference_url: str = "https://dhruva-api.bhashini.gov.in/services/inference/pipeline"
+    bhashini_inference_api_key: str = ""
+    bhashini_asr_service_id: str = "ai4bharat/conformer-hi-gpu--t4"
+    bhashini_tts_service_id: str = "Bhashini/IITM/TTS"
+    bhashini_tts_gender: str = "female"
 
     # Shared by every provider factory (STT/LLM/TTS) — how long to wait on
     # a real provider call before treating it as failed.
@@ -127,6 +170,22 @@ class Settings(BaseSettings):
     ivr_max_retries: int = 3
 
     wireguard_interface: str = "wg0"
+
+    def caller_message(self, kind: str) -> str:
+        """`kind` is "welcome", "error", or "goodbye"."""
+        configured = {
+            "welcome": self.ai_welcome_message,
+            "error": self.ai_error_message,
+            "goodbye": self.ai_goodbye_message,
+        }[kind]
+        if configured.strip():
+            return configured
+        defaults = DEFAULT_CALLER_MESSAGES.get(self.ai_language, DEFAULT_CALLER_MESSAGES["en"])
+        return defaults[kind]
+
+    def system_prompt_for(self, language: str | None) -> str:
+        policy = LANGUAGE_POLICIES.get(language or "")
+        return f"{self.ai_system_prompt}\n\n{policy}" if policy else self.ai_system_prompt
 
     def resolved_ari_url(self) -> str:
         if self.asterisk_ari_url:

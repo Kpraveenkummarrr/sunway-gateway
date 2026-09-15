@@ -69,10 +69,6 @@ from app.services.conversation import (
 logger = get_logger(__name__)
 
 _RECORDING_NAME_PREFIX = "ai-agent__"
-_SAFE_ERROR_MESSAGE = (
-    "Sorry, I'm having trouble right now. Please try again later or contact us directly."
-)
-_TOO_MANY_FAILURES_MESSAGE = "I'm having trouble understanding. Please try calling again later. Goodbye."
 
 
 class CallState:
@@ -215,7 +211,7 @@ class AICallController:
 
     async def _play_welcome(self, state: CallState) -> None:
         try:
-            await self._synthesize_and_play(state, self._settings.ai_welcome_message)
+            await self._synthesize_and_play(state, self._settings.caller_message("welcome"))
         except (TTSProviderError, AriError):
             logger.exception("Welcome message playback failed for channel %s", state.channel_id)
             # Not fatal — continue into the conversation loop even if the
@@ -298,12 +294,19 @@ class AICallController:
             if session is None or session.status != "active":
                 return
 
+            stt_started = time.monotonic()
             try:
                 transcription = await self._stt_provider.transcribe(audio_bytes, language=session.language)
             except STTProviderError as exc:
                 logger.warning("STT failed for session %s: %s", session.id, exc)
                 needs_safe_error = True
             else:
+                logger.info(
+                    "STT ok for session %s: %d chars in %dms",
+                    session.id,
+                    len(transcription.text),
+                    int((time.monotonic() - stt_started) * 1000),
+                )
                 try:
                     turn = await handle_text_turn(
                         db,
@@ -355,7 +358,7 @@ class AICallController:
             state.consecutive_failures,
         )
         try:
-            await self._synthesize_and_play(state, _TOO_MANY_FAILURES_MESSAGE)
+            await self._synthesize_and_play(state, self._settings.caller_message("goodbye"))
         except (TTSProviderError, AriError):
             logger.exception("Could not play goodbye message on channel %s", state.channel_id)
         await self._finish_call(state.channel_id, status="completed", hangup_cause="too_many_failed_turns")
@@ -363,14 +366,16 @@ class AICallController:
 
     async def _speak_safe_error(self, state: CallState) -> None:
         try:
-            await self._synthesize_and_play(state, _SAFE_ERROR_MESSAGE)
+            await self._synthesize_and_play(state, self._settings.caller_message("error"))
         except (TTSProviderError, AriError):
             logger.exception("Could not play safe-error message on channel %s", state.channel_id)
 
     async def _synthesize_and_play(self, state: CallState, text: str) -> None:
         if not text.strip():
             return
+        tts_started = time.monotonic()
         result = await self._tts_provider.synthesize(text, language=self._settings.ai_language)
+        tts_latency_ms = int((time.monotonic() - tts_started) * 1000)
 
         if result.audio_format == "text/mock":
             # Test mode: no real audio to play. Play a short, genuinely
@@ -380,28 +385,41 @@ class AICallController:
             await self._write_and_play_wav(state, make_short_beep_wav(), audio_format="wav")
             return
 
-        # Production mode: real synthesized audio. OpenAI's TTS wav output
-        # is 24kHz, but Asterisk's format_wav module only plays 8kHz/16kHz
-        # (confirmed via `module show like format`) — normalize before
-        # writing it out.
-        audio_bytes = result.audio_bytes
-        if result.audio_format == "wav":
-            try:
-                audio_bytes = normalize_for_asterisk_playback(audio_bytes)
-            except AudioFormatError:
-                logger.exception("Could not normalize TTS audio for channel %s; playing as-is", state.channel_id)
+        # Production mode: real synthesized audio at the vendor's native rate
+        # (OpenAI 24kHz, Bhashini 48kHz), but Asterisk's format_wav module
+        # only plays 8kHz/16kHz (confirmed via `module show like format`).
+        # Every real clip is normalized; one that can't be is a TTS failure
+        # rather than something played as-is, which the caller would hear as
+        # silence or noise.
+        if result.audio_format != "wav":
+            raise TTSProviderError(f"Unsupported TTS audio format for Asterisk playback: {result.audio_format!r}")
+        try:
+            source_rate = read_wav_info(result.audio_bytes).sample_rate
+            audio_bytes = normalize_for_asterisk_playback(result.audio_bytes)
+        except AudioFormatError as exc:
+            raise TTSProviderError(f"Could not normalize TTS audio for playback: {exc}") from exc
 
-        await self._write_and_play_wav(state, audio_bytes, audio_format=result.audio_format)
+        logger.info(
+            "TTS ok for channel %s: %d chars -> %dHz source, %d bytes 8kHz playback, %dms",
+            state.channel_id,
+            len(text),
+            source_rate,
+            len(audio_bytes),
+            tts_latency_ms,
+        )
+        await self._write_and_play_wav(state, audio_bytes, audio_format="wav")
 
     async def _write_and_play_wav(self, state: CallState, audio_bytes: bytes, *, audio_format: str) -> None:
-        # Written under the same spool root Asterisk already has
-        # permission to read from (see asterisk/etc/dialplan/ai_agent.conf),
-        # then played by reference.
+        # Written under the Asterisk spool root, then played by ABSOLUTE path
+        # (extension omitted). A relative "sound:ai-agent/..." is resolved
+        # against Asterisk's data dir (/usr/share/asterisk/sounds), not the
+        # spool — confirmed live: that fails with "does not exist in any
+        # format" and ARI reports PlaybackFinished instantly, i.e. silence.
         sound_dir = Path(self._settings.asterisk_recording_spool_path).parent / "sounds" / "ai-agent"
         sound_dir.mkdir(parents=True, exist_ok=True)
         file_stem = f"{state.session_id}-{int(time.time() * 1000)}"
         (sound_dir / f"{file_stem}.{audio_format}").write_bytes(audio_bytes)
-        await self._play_and_wait(state, media=f"sound:ai-agent/{file_stem}")
+        await self._play_and_wait(state, media=f"sound:{(sound_dir / file_stem).as_posix()}")
 
     async def _play_and_wait(self, state: CallState, *, media: str) -> None:
         """Starts ARI playback and waits for it to actually finish before

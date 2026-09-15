@@ -7,12 +7,13 @@ see docs/asterisk.md#audio-formats):
     signed PCM. This is what `channel.record(format="wav")` produces for
     a call on a ulaw/alaw channel (our PJSIP endpoints — see Phase 3).
 
-  STT input -> passed through unchanged. OpenAI Whisper accepts audio in
-    whatever format/sample rate it's given (it resamples server-side), so
-    no conversion is needed on the way in.
+  STT input -> OpenAI Whisper accepts audio at any rate (it resamples
+    server-side), so it's passed through unchanged. Bhashini's conformer
+    ASR is sent 16kHz mono 16-bit PCM (`resample_for_asr`).
 
-  TTS output (OpenAI, response_format="wav") -> WAV, 24kHz, mono, 16-bit
-    PCM — OpenAI's fixed native rate for that response format.
+  TTS output -> WAV at the vendor's native rate: OpenAI (response_format
+    ="wav") is 24kHz; Bhashini returned 48kHz in live testing. Neither is
+    playable by Asterisk as-is.
 
   Asterisk playback -> WAV, 8kHz or 16kHz mono 16-bit PCM ONLY. Confirmed
     via `asterisk -rx "module show like format"`: format_wav.so's own
@@ -33,6 +34,7 @@ from dataclasses import dataclass
 
 ASTERISK_SAMPLE_RATE = 8000
 ASTERISK_PLAYABLE_RATES = (8000, 16000)
+ASR_SAMPLE_RATE = 16000
 MIN_TURN_DURATION_SECONDS = 0.3
 DEFAULT_SILENCE_RMS_THRESHOLD = 150  # on a 16-bit PCM scale (0-32767)
 
@@ -76,14 +78,21 @@ def normalize_for_asterisk_playback(wav_bytes: bytes) -> bytes:
     info = read_wav_info(wav_bytes)
     if is_asterisk_playable(info):
         return wav_bytes
+    return _convert_pcm_wav(wav_bytes, target_rate=ASTERISK_SAMPLE_RATE)
 
+
+def _convert_pcm_wav(wav_bytes: bytes, *, target_rate: int) -> bytes:
+    """Any mono/stereo 8/16/32-bit PCM WAV -> mono 16-bit PCM at target_rate."""
     try:
         with wave.open(io.BytesIO(wav_bytes), "rb") as wf:
             raw = wf.readframes(wf.getnframes())
             channels = wf.getnchannels()
             sample_width = wf.getsampwidth()
             rate = wf.getframerate()
+    except (wave.Error, EOFError) as exc:
+        raise AudioFormatError(f"Not a readable WAV file: {exc}") from exc
 
+    try:
         if sample_width != 2:
             raw = audioop.lin2lin(raw, sample_width, 2)
             sample_width = 2
@@ -91,12 +100,14 @@ def normalize_for_asterisk_playback(wav_bytes: bytes) -> bytes:
         if channels == 2:
             raw = audioop.tomono(raw, sample_width, 0.5, 0.5)
             channels = 1
+        elif channels != 1:
+            raise AudioFormatError(f"Unsupported channel count: {channels}")
 
-        if rate != ASTERISK_SAMPLE_RATE:
-            raw, _ = audioop.ratecv(raw, sample_width, channels, rate, ASTERISK_SAMPLE_RATE, None)
-            rate = ASTERISK_SAMPLE_RATE
+        if rate != target_rate:
+            raw, _ = audioop.ratecv(raw, sample_width, channels, rate, target_rate, None)
+            rate = target_rate
     except audioop.error as exc:
-        raise AudioFormatError(f"Could not convert audio for playback: {exc}") from exc
+        raise AudioFormatError(f"Could not convert audio: {exc}") from exc
 
     out = io.BytesIO()
     with wave.open(out, "wb") as wf_out:
@@ -105,6 +116,17 @@ def normalize_for_asterisk_playback(wav_bytes: bytes) -> bytes:
         wf_out.setframerate(rate)
         wf_out.writeframes(raw)
     return out.getvalue()
+
+
+def resample_for_asr(wav_bytes: bytes, *, target_rate: int = ASR_SAMPLE_RATE) -> bytes:
+    """Converts PCM WAV (e.g. an 8kHz Asterisk recording) to mono 16-bit
+    PCM at `target_rate` — the input format speech models such as
+    Bhashini's conformer ASR are trained on. Returns the input unchanged
+    if it's already in that format."""
+    info = read_wav_info(wav_bytes)
+    if info.sample_width == 2 and info.channels == 1 and info.sample_rate == target_rate:
+        return wav_bytes
+    return _convert_pcm_wav(wav_bytes, target_rate=target_rate)
 
 
 def is_effectively_silent(wav_bytes: bytes, *, rms_threshold: int = DEFAULT_SILENCE_RMS_THRESHOLD) -> bool:

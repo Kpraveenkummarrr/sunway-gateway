@@ -62,11 +62,27 @@ async def main() -> None:
     )
 
     logger.info(
-        "AI call worker starting: ari=%s app=%s test_extension=%s",
+        "AI call worker starting: ari=%s app=%s test_extension=%s language=%s "
+        "stt=%s llm=%s tts=%s embeddings=%s",
         settings.resolved_ari_url(),
         settings.asterisk_ari_app,
         settings.ai_test_extension,
+        settings.ai_language,
+        settings.stt_provider,
+        settings.llm_provider,
+        settings.tts_provider,
+        settings.rag_embedding_provider,
     )
+    if settings.ai_language == "hi":
+        for kind in ("welcome", "error", "goodbye"):
+            message = settings.caller_message(kind)
+            if not any("ऀ" <= ch <= "ॿ" for ch in message):
+                logger.warning(
+                    "AI_LANGUAGE=hi but the %s message has no Devanagari text — callers will hear it "
+                    "as-is. Remove AI_%s_MESSAGE from .env to use the built-in Hindi phrase.",
+                    kind,
+                    kind.upper(),
+                )
     try:
         await controller.run_forever()
     finally:
