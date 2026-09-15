@@ -27,8 +27,24 @@ def get_llm_provider(settings: Settings) -> LLMProvider:
             max_tokens=settings.llm_max_tokens,
         )
 
+    if provider_name == "gemini":
+        from app.providers.llm.openai_provider import OpenAILLMProvider
+
+        if not settings.gemini_api_key:
+            raise LLMProviderError("LLM_PROVIDER=gemini but GEMINI_API_KEY is not set")
+        # Gemini's official OpenAI-compatible endpoint, through the same client.
+        return OpenAILLMProvider(
+            api_key=settings.gemini_api_key,
+            model=settings.gemini_model or "gemini-2.5-flash",
+            timeout_seconds=settings.provider_timeout_seconds,
+            max_tokens=settings.llm_max_tokens,
+            base_url=settings.gemini_base_url,
+            provider_name="Gemini",
+            reasoning_effort=settings.gemini_reasoning_effort or None,
+        )
+
     raise LLMProviderError(
-        "No LLM provider configured. Set LLM_PROVIDER to 'openai' (with "
-        "LLM_API_KEY) for real responses, or 'mock' for local "
-        "development/testing only."
+        "No LLM provider configured. Set LLM_PROVIDER to 'gemini' (with "
+        "GEMINI_API_KEY) or 'openai' (with LLM_API_KEY) for real responses, "
+        "or 'mock' for local development/testing only."
     )

@@ -240,19 +240,21 @@ NOT YET vs REQUIRES PHYSICAL SMG4004.
 The system runs entirely on `mock` providers out of the box — no API key
 needed, no cost, but responses are canned/deterministic, not real AI.
 
-**Hindi production (client requirement):** Bhashini for speech, OpenAI for
-the LLM.
+**Hindi production (client requirement):** Bhashini for speech, Google
+Gemini for the LLM (through its OpenAI-compatible endpoint).
 
-1. Install dependencies (includes `openai` and `httpx`):
+1. Install dependencies (includes `openai` — the client library used for
+   Gemini's OpenAI-compatible endpoint too — and `httpx`):
    `sudo -u sunway /opt/sunway-gateway/backend/.venv/bin/pip install -r requirements.txt`
 2. In `backend/.env` set:
    ```
    AI_LANGUAGE=hi
    STT_PROVIDER=bhashini
    TTS_PROVIDER=bhashini
-   LLM_PROVIDER=openai
-   LLM_MODEL=gpt-4o-mini
-   LLM_API_KEY=<secret>
+   LLM_PROVIDER=gemini
+   GEMINI_API_KEY=<secret>
+   GEMINI_MODEL=gemini-2.5-flash
+   GEMINI_REASONING_EFFORT=none
    BHASHINI_INFERENCE_URL=https://dhruva-api.bhashini.gov.in/services/inference/pipeline
    BHASHINI_INFERENCE_API_KEY=<secret>
    BHASHINI_ASR_SERVICE_ID=ai4bharat/conformer-hi-gpu--t4
@@ -268,9 +270,10 @@ the LLM.
    — every line must be `PASS`; WAVs are written to `/tmp/sunway-smoke`.
 4. Restart: `sudo systemctl restart sunway-ai-worker sunway-backend`
 
-`mock` remains a valid value for any provider as a rollback. The older
-all-OpenAI option (`STT_PROVIDER=openai`, `TTS_PROVIDER=openai`) is still
-supported; its opt-in check is
+`mock` remains a valid value for any provider as a rollback, and
+`LLM_PROVIDER=openai` (with `LLM_API_KEY`, `LLM_MODEL`) still works in place
+of Gemini. The older all-OpenAI option (`STT_PROVIDER=openai`,
+`TTS_PROVIDER=openai`) is still supported; its opt-in check is
 `REAL_PROVIDER_TESTS=1 ./.venv/bin/python -m pytest tests/test_real_provider_integration.py -v`.
 
 ## Step 10 — Upload the knowledge base

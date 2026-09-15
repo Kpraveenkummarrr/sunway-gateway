@@ -109,6 +109,15 @@ class Settings(BaseSettings):
     llm_model: str = ""
     llm_max_tokens: int = 400
 
+    # Google Gemini via its OpenAI-compatible endpoint (LLM_PROVIDER=gemini).
+    # reasoning_effort "none" turns off Gemini 2.5 "thinking", which adds
+    # latency a live phone call can't afford; set "low"/"medium"/"high" to
+    # re-enable it.
+    gemini_api_key: str = ""
+    gemini_base_url: str = "https://generativelanguage.googleapis.com/v1beta/openai/"
+    gemini_model: str = "gemini-2.5-flash"
+    gemini_reasoning_effort: str = "none"
+
     stt_provider: str = ""
     stt_api_key: str = ""
     stt_model: str = ""
