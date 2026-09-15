@@ -9,7 +9,7 @@ import base64
 
 from app.providers.bhashini.client import BhashiniClient, BhashiniError
 from app.providers.stt.base import STTProvider, STTProviderError, TranscriptionResult
-from app.services.audio import ASR_SAMPLE_RATE, AudioFormatError, read_wav_info, resample_for_asr
+from app.services.audio import AudioFormatError, read_wav_info, resample_for_asr
 
 SUPPORTED_LANGUAGE = "hi"
 
@@ -39,19 +39,17 @@ class BhashiniSTTProvider(STTProvider):
         except AudioFormatError as exc:
             raise STTProviderError(f"Caller audio is not usable PCM WAV: {exc}") from exc
 
+        # Exactly the request shape verified live (HTTP 200). Sending
+        # inputData.input with source=null is rejected with 422; the sample
+        # rate travels in the WAV header of the resampled audio.
         task_config = {
             "taskType": "asr",
             "config": {
-                "language": {"sourceLanguage": self._language},
                 "serviceId": self._service_id,
-                "audioFormat": "wav",
-                "samplingRate": ASR_SAMPLE_RATE,
+                "language": {"sourceLanguage": self._language},
             },
         }
-        input_data = {
-            "input": [{"source": None}],
-            "audio": [{"audioContent": base64.b64encode(prepared).decode("ascii")}],
-        }
+        input_data = {"audio": [{"audioContent": base64.b64encode(prepared).decode("ascii")}]}
 
         try:
             result = await self._client.run_task(task_config=task_config, input_data=input_data)

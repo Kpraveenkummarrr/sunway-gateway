@@ -193,12 +193,16 @@ async def test_asr_sends_hindi_16khz_base64_wav_and_returns_devanagari_transcrip
     assert result.language == "hi"
     assert result.duration_seconds == pytest.approx(1.0, abs=0.01)
 
-    task = recorder.body["pipelineTasks"][0]
-    assert task["taskType"] == "asr"
-    assert task["config"]["language"] == {"sourceLanguage": "hi"}
-    assert task["config"]["serviceId"] == "ai4bharat/conformer-hi-gpu--t4"
-    assert task["config"]["audioFormat"] == "wav"
-    assert task["config"]["samplingRate"] == 16000
+    # Exactly the live-verified request: no inputData.input (source=null -> 422).
+    assert recorder.body["pipelineTasks"] == [
+        {
+            "taskType": "asr",
+            "config": {"serviceId": "ai4bharat/conformer-hi-gpu--t4", "language": {"sourceLanguage": "hi"}},
+        }
+    ]
+    assert set(recorder.body["inputData"]) == {"audio"}
+    assert len(recorder.body["inputData"]["audio"]) == 1
+    assert set(recorder.body["inputData"]["audio"][0]) == {"audioContent"}
 
     uploaded = base64.b64decode(recorder.body["inputData"]["audio"][0]["audioContent"])
     info = read_wav_info(uploaded)
