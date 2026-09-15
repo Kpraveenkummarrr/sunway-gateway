@@ -11,6 +11,7 @@ class FakeAriClient:
         self.answered: list[str] = []
         self.played: list[tuple[str, str]] = []
         self.recorded: list[tuple[str, str]] = []
+        self.record_params: list[dict] = []
         self.hungup: list[str] = []
         self.fail_answer_for: set[str] = set()
         self.fail_record_for: set[str] = set()
@@ -98,6 +99,9 @@ class FakeAriClient:
 
             raise AriError("simulated record failure")
         self.recorded.append((channel_id, name))
+        self.record_params.append(
+            {"max_silence_seconds": max_silence_seconds, "max_duration_seconds": max_duration_seconds}
+        )
         return {"name": name, "format": audio_format}
 
     async def get_channel(self, channel_id: str) -> dict:

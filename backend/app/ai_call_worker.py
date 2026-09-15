@@ -63,7 +63,7 @@ async def main() -> None:
 
     logger.info(
         "AI call worker starting: ari=%s app=%s test_extension=%s language=%s "
-        "stt=%s llm=%s tts=%s embeddings=%s",
+        "stt=%s llm=%s tts=%s embeddings=%s end_of_speech=%ss tts_speed=%.2fx",
         settings.resolved_ari_url(),
         settings.asterisk_ari_app,
         settings.ai_test_extension,
@@ -72,6 +72,8 @@ async def main() -> None:
         settings.llm_provider,
         settings.tts_provider,
         settings.rag_embedding_provider,
+        settings.ai_end_of_speech_silence_seconds,
+        settings.ai_tts_speed,
     )
     if settings.ai_language == "hi":
         for kind in ("welcome", "error", "goodbye"):
@@ -83,9 +85,13 @@ async def main() -> None:
                     kind,
                     kind.upper(),
                 )
+    # Render welcome/error/goodbye once in the background so no call waits on
+    # TTS for them; calls arriving first simply share the in-flight render.
+    prewarm = asyncio.create_task(controller.prewarm_caller_messages())
     try:
         await controller.run_forever()
     finally:
+        prewarm.cancel()
         await ari.aclose()
 
 

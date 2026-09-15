@@ -101,3 +101,116 @@ def test_short_audio_is_flagged_too_short() -> None:
 def test_normal_audio_is_not_too_short() -> None:
     wav = make_tone_wav(duration_seconds=2.0)
     assert is_too_short(read_wav_info(wav)) is False
+
+
+# ---- telephone audio quality and latency processing ----
+
+import io  # noqa: E402
+import wave  # noqa: E402
+
+import numpy as np  # noqa: E402
+
+from app.services.audio import (  # noqa: E402
+    measure_levels,
+    prepare_for_asr,
+    prepare_tts_for_playback,
+    time_stretch,
+)
+
+
+def _wav_from(samples: np.ndarray, rate: int) -> bytes:
+    buf = io.BytesIO()
+    with wave.open(buf, "wb") as wf:
+        wf.setnchannels(1)
+        wf.setsampwidth(2)
+        wf.setframerate(rate)
+        wf.writeframes(np.clip(np.round(samples * 32767), -32768, 32767).astype("<i2").tobytes())
+    return buf.getvalue()
+
+
+def _samples(wav_bytes: bytes) -> tuple[np.ndarray, int]:
+    with wave.open(io.BytesIO(wav_bytes), "rb") as wf:
+        return np.frombuffer(wf.readframes(wf.getnframes()), "<i2").astype(float) / 32768, wf.getframerate()
+
+
+def _magnitude_at(samples: np.ndarray, rate: int, hz: float) -> float:
+    spectrum = np.abs(np.fft.rfft(samples * np.hanning(len(samples))))
+    return float(spectrum[np.argmin(np.abs(np.fft.rfftfreq(len(samples), 1 / rate) - hz))])
+
+
+def _tone(hz: float, seconds: float, rate: int, amplitude: float = 0.3) -> np.ndarray:
+    return amplitude * np.sin(2 * np.pi * hz * np.arange(int(seconds * rate)) / rate)
+
+
+def test_downsampling_does_not_alias_high_frequencies_into_the_phone_band() -> None:
+    """48kHz TTS -> 8kHz: a 6kHz component (sibilant energy) must not fold
+    down to 2kHz. The old audioop.ratecv path passed it at 0 dB."""
+    source = _wav_from(_tone(1000, 2.0, 48000) + _tone(6000, 2.0, 48000), 48000)
+    out, rate = _samples(normalize_for_asterisk_playback(source))
+    assert rate == 8000
+    alias_db = 20 * np.log10(_magnitude_at(out, rate, 2000) / _magnitude_at(out, rate, 1000))
+    assert alias_db < -60
+
+
+def test_telephone_band_is_preserved_by_resampling() -> None:
+    out, _ = _samples(normalize_for_asterisk_playback(_wav_from(_tone(3000, 1.0, 48000, amplitude=0.5), 48000)))
+    assert np.max(np.abs(out[800:-800])) == pytest.approx(0.5, abs=0.02)
+
+
+def test_prepare_tts_trims_silence_and_outputs_8khz_mono_pcm() -> None:
+    rate = 48000
+    speech = _tone(300, 2.0, rate) * (0.6 + 0.4 * np.sin(2 * np.pi * 4 * np.arange(2 * rate) / rate))
+    source = _wav_from(np.concatenate([np.zeros(rate), speech, np.zeros(rate)]), rate)
+
+    prepared = prepare_tts_for_playback(source, speed=1.0)
+
+    info = read_wav_info(prepared)
+    assert (info.sample_rate, info.channels, info.sample_width) == (8000, 1, 2)
+    assert info.duration_seconds == pytest.approx(2.1, abs=0.1)  # 1 s silence each side -> 60 ms pads
+    levels = measure_levels(prepared)
+    assert levels.leading_silence_seconds < 0.1 and levels.trailing_silence_seconds < 0.1
+    assert levels.peak_dbfs == pytest.approx(-3.0, abs=0.2)
+    assert levels.clipped_ratio == 0.0
+
+
+def test_prepare_tts_speeds_up_speech_without_changing_pitch() -> None:
+    source = _wav_from(_tone(440, 3.0, 48000), 48000)
+    normal = prepare_tts_for_playback(source, speed=1.0)
+    faster = prepare_tts_for_playback(source, speed=1.2)
+
+    assert read_wav_info(faster).duration_seconds == pytest.approx(read_wav_info(normal).duration_seconds / 1.2, rel=0.03)
+    samples, rate = _samples(faster)
+    spectrum = np.abs(np.fft.rfft(samples * np.hanning(len(samples))))
+    assert np.fft.rfftfreq(len(samples), 1 / rate)[np.argmax(spectrum)] == pytest.approx(440, abs=5)
+
+
+def test_prepare_tts_never_clips_hot_audio() -> None:
+    hot = _wav_from(np.clip(_tone(500, 1.0, 48000, amplitude=1.4), -1, 1), 48000)
+    levels = measure_levels(prepare_tts_for_playback(hot))
+    assert levels.clipped_ratio == 0.0
+    assert levels.peak_dbfs <= -2.8
+
+
+def test_prepare_tts_rejects_silent_audio() -> None:
+    with pytest.raises(AudioFormatError, match="silent"):
+        prepare_tts_for_playback(_wav_from(np.zeros(48000), 48000))
+
+
+def test_prepare_for_asr_trims_pause_and_end_of_speech_silence() -> None:
+    rate = 8000
+    recording = np.concatenate([np.zeros(rate), _tone(400, 1.0, rate), np.zeros(2 * rate)])  # pause, speech, 2 s silence
+    prepared = prepare_for_asr(_wav_from(recording, rate))
+
+    info = read_wav_info(prepared)
+    assert (info.sample_rate, info.channels, info.sample_width) == (16000, 1, 2)
+    assert info.duration_seconds == pytest.approx(1.5, abs=0.1)  # 1 s speech + 250 ms context each side
+
+
+def test_prepare_for_asr_keeps_short_audio_untrimmed() -> None:
+    prepared = prepare_for_asr(make_tone_wav(duration_seconds=0.2, sample_rate=8000))
+    assert read_wav_info(prepared).duration_seconds == pytest.approx(0.2, abs=0.01)
+
+
+def test_time_stretch_is_identity_at_normal_speed() -> None:
+    samples = _tone(440, 1.0, 8000)
+    assert time_stretch(samples, 8000, 1.0) is samples

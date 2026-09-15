@@ -56,6 +56,9 @@ class TurnResult:
     user_message: AIMessage
     assistant_message: AIMessage
     retrieved_chunks: list[SearchResult] = field(default_factory=list)
+    finish_reason: str | None = None
+    # Stage latencies in ms: embed, rag, llm.
+    timings: dict[str, int] = field(default_factory=dict)
 
 
 @dataclass(frozen=True)
@@ -144,10 +147,13 @@ async def handle_text_turn(
     turn_started = time.monotonic()
     user_message = await _record_message(db, session, role="caller", text=user_text.strip())
 
+    timings: dict[str, int] = {}
+
     async def _pipeline() -> tuple[list[SearchResult], object, int]:
         embed_started = time.monotonic()
         query_embedding = await embedding_provider.embed_one(user_text)
-        logger.info("embed stage: %dms", int((time.monotonic() - embed_started) * 1000))
+        timings["embed"] = int((time.monotonic() - embed_started) * 1000)
+        logger.info("embed stage: %dms", timings["embed"])
 
         rag_started = time.monotonic()
         try:
@@ -162,9 +168,8 @@ async def handle_text_turn(
             )
         except asyncio.TimeoutError as exc:
             raise SearchError(f"RAG search timed out after {settings.provider_timeout_seconds}s") from exc
-        logger.info(
-            "rag stage: %dms, %d chunks", int((time.monotonic() - rag_started) * 1000), len(retrieved)
-        )
+        timings["rag"] = int((time.monotonic() - rag_started) * 1000)
+        logger.info("rag stage: %dms, %d chunks", timings["rag"], len(retrieved))
 
         context = build_context(retrieved, max_chars=settings.ai_max_context_chars)
         history = await get_history(db, session.id)
@@ -177,6 +182,7 @@ async def handle_text_turn(
             retrieved_context=context,
         )
         llm_latency_ms = int((time.monotonic() - llm_started) * 1000)
+        timings["llm"] = llm_latency_ms
         logger.info("llm stage: %dms", llm_latency_ms)
 
         return retrieved, llm_response, llm_latency_ms
@@ -200,7 +206,13 @@ async def handle_text_turn(
     )
 
     logger.info("turn total: %dms", int((time.monotonic() - turn_started) * 1000))
-    return TurnResult(user_message=user_message, assistant_message=assistant_message, retrieved_chunks=retrieved)
+    return TurnResult(
+        user_message=user_message,
+        assistant_message=assistant_message,
+        retrieved_chunks=retrieved,
+        finish_reason=llm_response.finish_reason,
+        timings=timings,
+    )
 
 
 async def handle_audio_turn(

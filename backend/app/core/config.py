@@ -36,9 +36,11 @@ LANGUAGE_POLICIES: dict[str, str] = {
         "message, the knowledge base excerpts, or earlier messages are in "
         "English or mix languages — convey any information you use in natural "
         "spoken Hindi. This is a phone call and your reply will be spoken "
-        "aloud: use short, plain conversational sentences (one to three), with "
-        "no markdown, bullet points, numbered lists, headings, emojis, or "
-        "special symbols."
+        "aloud: answer in one or two short, plain conversational sentences "
+        "(under 35 words in total), each ending with a full stop (।) or "
+        "question mark, with no markdown, bullet points, numbered lists, "
+        "headings, emojis, or special symbols. Give the most important "
+        "information first."
     ),
 }
 
@@ -85,7 +87,18 @@ class Settings(BaseSettings):
     # --- AI phone call test path (Phase 6) ---
     ai_test_extension: str = "700"
     ai_call_timeout_seconds: int = 120  # hard cap on one AI call's total duration
-    ai_audio_timeout_seconds: int = 8  # max silence before ending the caller's turn
+    # Caller turn capture (ARI record). End-of-speech silence is how long
+    # Asterisk waits after the caller stops talking before handing the
+    # recording over — every second here is dead air before any AI work
+    # starts. ARI accepts whole seconds only.
+    ai_end_of_speech_silence_seconds: int = 2
+    ai_max_turn_seconds: int = 20
+    # Consecutive seconds of no speech (across re-prompted turns) before
+    # the call says goodbye and hangs up.
+    ai_no_input_timeout_seconds: int = 20
+    # Playback tempo for synthesized speech, pitch preserved (1.0 = as the
+    # TTS vendor produced it).
+    ai_tts_speed: float = 1.15
     # Caller-facing phrases. Leave empty to use the built-in phrase for
     # AI_LANGUAGE (DEFAULT_CALLER_MESSAGES); set only to override it.
     ai_welcome_message: str = ""

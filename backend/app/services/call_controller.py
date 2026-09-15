@@ -8,18 +8,22 @@ Responsibility split (per docs/architecture.md):
         and cleaning up on hangup/error/timeout.
 
 No AI business logic (RAG, LLM, prompt policy) lives here — all of that
-stays in app.services.conversation, unmodified from Phase 5. This module
-only decides *when* to call it and how to get audio in and out of Asterisk.
+stays in app.services.conversation. This module only decides *when* to
+call it and how to get audio in and out of Asterisk.
 
 TEST MODE vs PRODUCTION MEDIA MODE (see docs/architecture.md):
 When TTS_PROVIDER=mock, synthesized "audio" is placeholder bytes that
-Asterisk cannot play as real speech — the controller marks the message as
-delivered (for conversation-loop/session-state testing) without invoking
-ARI playback for it, and plays a short tone instead so the call-control
-mechanism (the Playback API call itself) is still exercised. This is not
-a fallback from a *configured* real provider to mock — TTS_PROVIDER is
-never silently swapped; it only affects how already-mock output is
-handled downstream.
+Asterisk cannot play as real speech — the controller plays a short tone
+instead so the call-control mechanism (the Playback API call itself) is
+still exercised. TTS_PROVIDER is never silently swapped; this only affects
+how already-mock output is handled downstream.
+
+LATENCY: fixed caller phrases (welcome/error/goodbye) are synthesized once
+and reused by every call (pre-rendered at worker startup). Replies are
+split into sentence chunks: the first chunk starts playing as soon as it is
+synthesized while the next one is synthesized in parallel, so the caller
+hears the answer after one short TTS request instead of after the whole
+reply. Each turn logs one "Turn timing" line with every stage's latency.
 
 Concurrency: `run_forever` dispatches each ARI event as its own asyncio
 task rather than awaiting them one at a time. Without this, a slow turn
@@ -38,12 +42,15 @@ against it and are cancelled when it fires, and every ARI media request
 (play, record) is guarded by it — so a call that has ended never gets a
 late /play or /record. A request that still loses the race by milliseconds
 gets ARI 404/409 ("channel not found" / "not in Stasis"), which is handled
-as the channel being gone, not as an error.
+as the channel being gone, not as an error. Shared phrase rendering is the
+one exception to cancellation: it keeps going (shielded) for the next call.
 """
 
 import asyncio
+import re
 import time
 import uuid
+from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -63,7 +70,7 @@ from app.services.audio import (
     is_effectively_silent,
     is_too_short,
     make_short_beep_wav,
-    normalize_for_asterisk_playback,
+    prepare_tts_for_playback,
     read_wav_info,
 )
 from app.services.conversation import (
@@ -80,10 +87,53 @@ _RECORDING_NAME_PREFIX = "ai-agent__"
 # ARI answers "404 Channel not found" or "409 Channel not in a Stasis
 # application" once the channel has hung up / left our app.
 _CHANNEL_GONE_STATUSES = (404, 409)
+_CALLER_MESSAGE_KINDS = ("welcome", "error", "goodbye")
+
+_SENTENCE_BREAK = re.compile(r"(?<=[।॥?!])\s+|(?<=\.)\s+")
+_SENTENCE_END = ("।", "॥", "?", "!", ".")
+MIN_SPEECH_CHUNK_CHARS = 40
 
 
 def _channel_gone(exc: AriError) -> bool:
     return exc.status_code in _CHANNEL_GONE_STATUSES
+
+
+def _ms_since(started: float) -> int:
+    return int((time.monotonic() - started) * 1000)
+
+
+def speech_chunks(text: str, *, truncated: bool = False, min_chars: int = MIN_SPEECH_CHUNK_CHARS) -> list[str]:
+    """Splits a reply into sentence-based chunks for incremental TTS.
+    Sentences shorter than `min_chars` are merged forward so TTS isn't
+    called for fragments. When the LLM hit its token limit (`truncated`), a
+    trailing unfinished sentence is dropped rather than spoken cut off."""
+    sentences = [s.strip() for s in _SENTENCE_BREAK.split(text.strip()) if s.strip()]
+    if truncated and len(sentences) > 1 and not sentences[-1].endswith(_SENTENCE_END):
+        sentences.pop()
+
+    chunks: list[str] = []
+    current = ""
+    for sentence in sentences:
+        current = f"{current} {sentence}".strip()
+        if len(current) >= min_chars:
+            chunks.append(current)
+            current = ""
+    if current:
+        if chunks and len(current) < min_chars:
+            chunks[-1] = f"{chunks[-1]} {current}"
+        else:
+            chunks.append(current)
+    return chunks
+
+
+@dataclass(frozen=True)
+class SpeechClip:
+    """Telephone-ready audio (8kHz mono 16-bit WAV) plus how long it took."""
+
+    audio: bytes
+    tts_ms: int
+    prep_ms: int
+    seconds: float
 
 
 class CallState:
@@ -91,7 +141,8 @@ class CallState:
     id. The database (Call + AISession rows) remains the durable source of
     truth — this is just what the controller needs while the call is live
     (recording sequence number, consecutive-failure count for the retry
-    cap, whether the call has ended). Never shared across channels.
+    cap, seconds without caller speech, whether the call has ended). Never
+    shared across channels.
 
     call_row_id / session_id are None only while StasisStart is still
     creating the database rows."""
@@ -103,6 +154,7 @@ class CallState:
         "started_monotonic",
         "recording_seq",
         "consecutive_failures",
+        "silent_seconds",
         "ended",
         "end_status",
         "hangup_cause",
@@ -118,6 +170,7 @@ class CallState:
         self.started_monotonic = time.monotonic()
         self.recording_seq = 0
         self.consecutive_failures = 0
+        self.silent_seconds = 0.0
         self.ended = asyncio.Event()
         self.end_status: str | None = None
         self.hangup_cause: str | None = None
@@ -158,6 +211,8 @@ class AICallController:
         self._calls: dict[str, CallState] = {}
         self._playback_finished: dict[str, asyncio.Event] = {}
         self._background_tasks: set[asyncio.Task] = set()
+        # Rendered fixed caller phrases, keyed by text; shared by all calls.
+        self._phrase_clips: dict[str, asyncio.Future] = {}
 
     @property
     def active_call_count(self) -> int:
@@ -172,6 +227,26 @@ class AICallController:
             task = asyncio.create_task(self.dispatch_event(event))
             self._background_tasks.add(task)
             task.add_done_callback(self._background_tasks.discard)
+
+    async def prewarm_caller_messages(self) -> None:
+        """Renders the welcome/error/goodbye phrases once so no call waits
+        on TTS for them. Failures are logged, not raised — a call that finds
+        no rendered phrase just renders it itself."""
+        for kind in _CALLER_MESSAGE_KINDS:
+            started = time.monotonic()
+            try:
+                clip = await self._phrase_clip(self._settings.caller_message(kind))
+            except TTSProviderError as exc:
+                logger.warning("Could not pre-render %s message: %s", kind, exc)
+                continue
+            logger.info(
+                "Pre-rendered %s message: %.1fs audio in %dms (tts=%dms prep=%dms)",
+                kind,
+                clip.seconds,
+                _ms_since(started),
+                clip.tts_ms,
+                clip.prep_ms,
+            )
 
     async def dispatch_event(self, event: dict) -> None:
         """Handles one ARI event. Public (not just used by run_forever)
@@ -263,7 +338,7 @@ class AICallController:
 
     async def _play_welcome(self, state: CallState) -> None:
         try:
-            await self._synthesize_and_play(state, self._settings.caller_message("welcome"))
+            await self._play_caller_message(state, "welcome")
         except (TTSProviderError, AriError):
             logger.exception("Welcome message playback failed for channel %s", state.channel_id)
             # Not fatal — continue into the conversation loop even if the
@@ -283,8 +358,8 @@ class AICallController:
             await self._ari.record(
                 state.channel_id,
                 name=name,
-                max_duration_seconds=self._settings.ai_audio_timeout_seconds * 4,
-                max_silence_seconds=self._settings.ai_audio_timeout_seconds,
+                max_duration_seconds=self._settings.ai_max_turn_seconds,
+                max_silence_seconds=self._settings.ai_end_of_speech_silence_seconds,
             )
         except AriError as exc:
             if _channel_gone(exc):
@@ -295,6 +370,7 @@ class AICallController:
             await self._finish_call(state.channel_id, status="failed", hangup_cause="record_failed")
 
     async def _on_recording_finished(self, event: dict) -> None:
+        turn_started = time.monotonic()
         recording = event.get("recording", {})
         name: str = recording.get("name", "")
         if not name.startswith(_RECORDING_NAME_PREFIX):
@@ -330,20 +406,36 @@ class AICallController:
             wav_info = None
 
         if wav_info is not None and (is_too_short(wav_info) or is_effectively_silent(audio_bytes)):
+            state.silent_seconds += wav_info.duration_seconds
             logger.info(
-                "Turn %d on channel %s was silence/too-short (%.2fs) — skipping STT",
+                "Turn %d on channel %s had no speech (%.2fs) — %.1fs of %ds without input",
                 state.recording_seq,
                 state.channel_id,
                 wav_info.duration_seconds,
+                state.silent_seconds,
+                self._settings.ai_no_input_timeout_seconds,
             )
-            if not await self._register_failure(state):
+            if state.silent_seconds >= self._settings.ai_no_input_timeout_seconds:
+                await self._end_call_with_goodbye(state, hangup_cause="no_input")
+            else:
                 await self._start_next_recording(state)
             return
 
-        await self._run_turn(state, audio_bytes)
+        state.silent_seconds = 0.0
+        await self._run_turn(
+            state,
+            audio_bytes,
+            turn_started=turn_started,
+            audio_seconds=wav_info.duration_seconds if wav_info is not None else 0.0,
+        )
 
-    async def _run_turn(self, state: CallState, audio_bytes: bytes) -> None:
+    async def _run_turn(
+        self, state: CallState, audio_bytes: bytes, *, turn_started: float | None = None, audio_seconds: float = 0.0
+    ) -> None:
+        turn_started = turn_started if turn_started is not None else time.monotonic()
         reply_text: str | None = None
+        finish_reason: str | None = None
+        stage_timings: dict[str, int] = {}
         needs_safe_error = False
         succeeded = False
         if not state.is_active:
@@ -366,11 +458,12 @@ class AICallController:
                 if not completed:
                     logger.info("Call on channel %s ended during STT — turn abandoned", state.channel_id)
                     return
+                stage_timings["asr"] = _ms_since(stt_started)
                 logger.info(
                     "STT ok for session %s: %d chars in %dms",
                     session.id,
                     len(transcription.text),
-                    int((time.monotonic() - stt_started) * 1000),
+                    stage_timings["asr"],
                 )
                 try:
                     turn = await handle_text_turn(
@@ -382,6 +475,8 @@ class AICallController:
                         llm_provider=self._llm_provider,
                     )
                     reply_text = turn.assistant_message.text
+                    finish_reason = turn.finish_reason
+                    stage_timings.update(turn.timings)
                     succeeded = True
                 except ConversationTimeoutError as exc:
                     logger.error("AI turn timed out for session %s: %s", session.id, exc)
@@ -400,18 +495,41 @@ class AICallController:
         if needs_safe_error:
             await self._speak_safe_error(state)
         elif reply_text:
+            reply_started = time.monotonic()
+            pre_reply_ms = _ms_since(turn_started)
             try:
-                await self._synthesize_and_play(state, reply_text)
+                speech = await self._speak_reply(state, reply_text, truncated=finish_reason == "length")
             except TTSProviderError as exc:
                 logger.warning("TTS failed for session %s: %s", state.session_id, exc)
+            else:
+                first_audio_ms = speech.pop("first_audio_ms", None)
+                logger.info(
+                    "Turn timing channel=%s turn=%d audio=%.1fs asr=%sms embed=%sms rag=%sms llm=%sms "
+                    "reply_chars=%d chunks=%d tts_first=%sms prep_first=%sms response=%sms "
+                    "speaking=%dms total=%dms",
+                    state.channel_id,
+                    state.recording_seq,
+                    audio_seconds,
+                    stage_timings.get("asr", "-"),
+                    stage_timings.get("embed", "-"),
+                    stage_timings.get("rag", "-"),
+                    stage_timings.get("llm", "-"),
+                    len(reply_text),
+                    speech["chunks"],
+                    speech["tts_first_ms"] if speech["tts_first_ms"] is not None else "-",
+                    speech["prep_first_ms"] if speech["prep_first_ms"] is not None else "-",
+                    pre_reply_ms + first_audio_ms if first_audio_ms is not None else "-",
+                    _ms_since(reply_started),
+                    _ms_since(turn_started),
+                )
 
         await self._start_next_recording(state)
 
     async def _register_failure(self, state: CallState) -> bool:
-        """Tracks a "bad" turn (silence, STT failure, provider failure).
-        Returns True if the call was ended because the consecutive-failure
-        cap was hit — callers should stop their own turn processing when
-        this returns True."""
+        """Tracks a failed turn (STT or provider failure). Returns True if
+        the call was ended because the consecutive-failure cap was hit —
+        callers should stop their own turn processing when this returns
+        True."""
         if not state.is_active:
             return True
         state.consecutive_failures += 1
@@ -423,68 +541,147 @@ class AICallController:
             state.channel_id,
             state.consecutive_failures,
         )
+        await self._end_call_with_goodbye(state, hangup_cause="too_many_failed_turns")
+        return True
+
+    async def _end_call_with_goodbye(self, state: CallState, *, hangup_cause: str) -> None:
         try:
-            await self._synthesize_and_play(state, self._settings.caller_message("goodbye"))
+            await self._play_caller_message(state, "goodbye")
         except (TTSProviderError, AriError):
             logger.exception("Could not play goodbye message on channel %s", state.channel_id)
-        await self._finish_call(state.channel_id, status="completed", hangup_cause="too_many_failed_turns")
-        return True
+        await self._finish_call(state.channel_id, status="completed", hangup_cause=hangup_cause)
 
     async def _speak_safe_error(self, state: CallState) -> None:
         try:
-            await self._synthesize_and_play(state, self._settings.caller_message("error"))
+            await self._play_caller_message(state, "error")
         except (TTSProviderError, AriError):
             logger.exception("Could not play safe-error message on channel %s", state.channel_id)
 
-    async def _synthesize_and_play(self, state: CallState, text: str) -> None:
-        if not text.strip():
-            return
-        if not state.is_active:
-            logger.info("Skipping TTS for channel %s: call already ended", state.channel_id)
-            return
+    # ---- speech ----
+
+    async def _render_speech(self, text: str) -> SpeechClip:
+        """TTS + telephone preparation for one piece of text, independent of
+        any call. Raises TTSProviderError."""
         tts_started = time.monotonic()
-        completed, result = await self._unless_call_ends(
-            state, self._tts_provider.synthesize(text, language=self._settings.ai_language)
-        )
-        if not completed:
-            logger.info(
-                "Call on channel %s ended during TTS synthesis — synthesis cancelled, nothing played",
-                state.channel_id,
-            )
-            return
-        tts_latency_ms = int((time.monotonic() - tts_started) * 1000)
+        result = await self._tts_provider.synthesize(text, language=self._settings.ai_language)
+        tts_ms = _ms_since(tts_started)
 
         if result.audio_format == "text/mock":
             # Test mode: no real audio to play. Play a short, genuinely
             # bounded generated beep so the Playback API mechanism is
             # still exercised, and log what would have been spoken.
-            logger.info("TTS (mock) for channel %s: %r", state.channel_id, text)
-            await self._write_and_play_wav(state, make_short_beep_wav(), audio_format="wav")
-            return
+            logger.info("TTS (mock): %r", text)
+            beep = make_short_beep_wav()
+            return SpeechClip(audio=beep, tts_ms=tts_ms, prep_ms=0, seconds=read_wav_info(beep).duration_seconds)
 
-        # Production mode: real synthesized audio at the vendor's native rate
-        # (OpenAI 24kHz, Bhashini 48kHz), but Asterisk's format_wav module
-        # only plays 8kHz/16kHz (confirmed via `module show like format`).
-        # Every real clip is normalized; one that can't be is a TTS failure
+        # Real synthesized audio arrives at the vendor's native rate (OpenAI
+        # 24kHz, Bhashini 48kHz); Asterisk's format_wav only plays 8kHz/16kHz
+        # (confirmed via `module show like format`) and the GSM leg is 8kHz.
+        # Every real clip is prepared; one that can't be is a TTS failure
         # rather than something played as-is, which the caller would hear as
         # silence or noise.
         if result.audio_format != "wav":
             raise TTSProviderError(f"Unsupported TTS audio format for Asterisk playback: {result.audio_format!r}")
+        prep_started = time.monotonic()
         try:
             source_rate = read_wav_info(result.audio_bytes).sample_rate
-            audio_bytes = normalize_for_asterisk_playback(result.audio_bytes)
+            audio = await asyncio.to_thread(
+                prepare_tts_for_playback, result.audio_bytes, speed=self._settings.ai_tts_speed
+            )
+            seconds = read_wav_info(audio).duration_seconds
         except AudioFormatError as exc:
-            raise TTSProviderError(f"Could not normalize TTS audio for playback: {exc}") from exc
+            raise TTSProviderError(f"Could not prepare TTS audio for playback: {exc}") from exc
+        prep_ms = _ms_since(prep_started)
 
         logger.info(
-            "TTS ok for channel %s: %d chars -> %dHz source, %d bytes 8kHz playback, %dms",
-            state.channel_id,
+            "TTS ok: %d chars -> %dHz source, %.2fs 8kHz playback at %.2fx, tts=%dms prep=%dms",
             len(text),
             source_rate,
-            len(audio_bytes),
-            tts_latency_ms,
+            seconds,
+            self._settings.ai_tts_speed,
+            tts_ms,
+            prep_ms,
         )
-        await self._write_and_play_wav(state, audio_bytes, audio_format="wav")
+        return SpeechClip(audio=audio, tts_ms=tts_ms, prep_ms=prep_ms, seconds=seconds)
+
+    def _phrase_clip(self, text: str) -> asyncio.Future:
+        """The shared rendering of a fixed caller phrase, started on first use.
+        A failed or cancelled rendering is replaced on the next request."""
+        future = self._phrase_clips.get(text)
+        if future is None or (future.done() and (future.cancelled() or future.exception() is not None)):
+            future = asyncio.ensure_future(self._render_speech(text))
+            future.add_done_callback(lambda f: f.cancelled() or f.exception())  # mark exception retrieved
+            self._phrase_clips[text] = future
+        return future
+
+    async def _play_caller_message(self, state: CallState, kind: str) -> None:
+        text = self._settings.caller_message(kind)
+        if not text.strip() or not state.is_active:
+            return
+        # Shielded: a caller hanging up stops *this call's* wait, but the
+        # shared rendering continues for the next call.
+        completed, clip = await self._unless_call_ends(state, asyncio.shield(self._phrase_clip(text)))
+        if not completed:
+            logger.info("Call on channel %s ended while the %s message was rendering", state.channel_id, kind)
+            return
+        await self._write_and_play_wav(state, clip.audio, audio_format="wav")
+
+    async def _synthesize_clip(self, state: CallState, text: str) -> SpeechClip | None:
+        """Renders `text` for this call; None if there is nothing to say or
+        the call ended first (the synthesis is then cancelled)."""
+        if not text.strip():
+            return None
+        if not state.is_active:
+            logger.info("Skipping TTS for channel %s: call already ended", state.channel_id)
+            return None
+        completed, clip = await self._unless_call_ends(state, self._render_speech(text))
+        if not completed:
+            logger.info(
+                "Call on channel %s ended during TTS synthesis — synthesis cancelled, nothing played",
+                state.channel_id,
+            )
+            return None
+        return clip
+
+    async def _synthesize_and_play(self, state: CallState, text: str) -> None:
+        clip = await self._synthesize_clip(state, text)
+        if clip is not None:
+            await self._write_and_play_wav(state, clip.audio, audio_format="wav")
+
+    async def _speak_reply(self, state: CallState, text: str, *, truncated: bool = False) -> dict:
+        """Plays a reply chunk by chunk: each chunk starts as soon as it is
+        synthesized, while the next chunk is already being synthesized.
+        Returns timing stats; `first_audio_ms` is None if nothing played."""
+        chunks = speech_chunks(text, truncated=truncated)
+        stats: dict = {"chunks": len(chunks), "first_audio_ms": None, "tts_first_ms": None, "prep_first_ms": None}
+        if not chunks or not state.is_active:
+            return stats
+
+        started = time.monotonic()
+        pending = asyncio.ensure_future(self._render_speech(chunks[0]))
+        try:
+            for index in range(len(chunks)):
+                completed, clip = await self._unless_call_ends(state, pending)
+                if not completed:
+                    logger.info(
+                        "Call on channel %s ended during reply synthesis — %d of %d chunks unplayed",
+                        state.channel_id,
+                        len(chunks) - index,
+                        len(chunks),
+                    )
+                    return stats
+                pending = (
+                    asyncio.ensure_future(self._render_speech(chunks[index + 1])) if index + 1 < len(chunks) else None
+                )
+                if stats["first_audio_ms"] is None:
+                    stats.update(first_audio_ms=_ms_since(started), tts_first_ms=clip.tts_ms, prep_first_ms=clip.prep_ms)
+                await self._write_and_play_wav(state, clip.audio, audio_format="wav")
+                if not state.is_active:
+                    return stats
+        finally:
+            if pending is not None and not pending.done():
+                pending.cancel()
+        return stats
 
     async def _write_and_play_wav(self, state: CallState, audio_bytes: bytes, *, audio_format: str) -> None:
         # Written under the Asterisk spool root, then played by ABSOLUTE path
@@ -497,7 +694,7 @@ class AICallController:
             return
         sound_dir = Path(self._settings.asterisk_recording_spool_path).parent / "sounds" / "ai-agent"
         sound_dir.mkdir(parents=True, exist_ok=True)
-        file_stem = f"{state.session_id}-{int(time.time() * 1000)}"
+        file_stem = f"{state.session_id}-{time.time_ns()}"
         (sound_dir / f"{file_stem}.{audio_format}").write_bytes(audio_bytes)
         await self._play_and_wait(state, media=f"sound:{(sound_dir / file_stem).as_posix()}")
 

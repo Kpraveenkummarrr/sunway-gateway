@@ -34,9 +34,12 @@ from app.providers.llm.base import LLMMessage  # noqa: E402
 from app.services.audio import (  # noqa: E402
     ASTERISK_SAMPLE_RATE,
     is_effectively_silent,
+    measure_levels,
     normalize_for_asterisk_playback,
+    prepare_tts_for_playback,
     read_wav_info,
 )
+from app.services.call_controller import speech_chunks  # noqa: E402
 
 SPOKEN_QUESTION = "पशुओं में लम्पी रोग के लक्षण क्या हैं?"
 LLM_KEY_SETTING = {"gemini": "gemini_api_key", "openai": "llm_api_key"}
@@ -158,14 +161,20 @@ async def main() -> int:
     try:
         started = time.monotonic()
         synthesis = await tts.synthesize(SPOKEN_QUESTION, language="hi")
+        tts_ms = ms_since(started)
         source = read_wav_info(synthesis.audio_bytes)
         tts_wav = synthesis.audio_bytes
         (args.out / "tts_bhashini_original.wav").write_bytes(tts_wav)
-        normalized = normalize_for_asterisk_playback(tts_wav)
-        (args.out / "tts_asterisk_8k.wav").write_bytes(normalized)
+        raw = measure_levels(tts_wav)
+        started = time.monotonic()
+        prepared = prepare_tts_for_playback(tts_wav, speed=settings.ai_tts_speed)
+        prep_ms = ms_since(started)
+        (args.out / "tts_asterisk_8k.wav").write_bytes(prepared)
         detail = (
-            f"{ms_since(started)}ms, source={source.sample_rate}Hz/{source.channels}ch/"
-            f"{source.sample_width * 8}-bit {source.duration_seconds:.2f}s -> {check_asterisk_wav('normalized TTS', normalized)}"
+            f"tts={tts_ms}ms prep={prep_ms}ms | raw {source.sample_rate}Hz/{source.channels}ch/{source.sample_width * 8}-bit "
+            f"{source.duration_seconds:.2f}s peak={raw.peak_dbfs:.1f}dBFS clipped={raw.clipped_ratio:.3%} "
+            f"lead/trail silence={raw.leading_silence_seconds:.2f}/{raw.trailing_silence_seconds:.2f}s | "
+            f"played at {settings.ai_tts_speed:.2f}x: {check_asterisk_wav('prepared TTS', prepared)}"
         )
         record("Bhashini TTS (Hindi)", "PASS", detail)
     except Exception as exc:  # noqa: BLE001
@@ -218,17 +227,29 @@ async def main() -> int:
                 turn_ms = ms_since(started)
                 reply_text = turn.assistant_message.text or ""
 
+                # Before: whole reply in one TTS request. After: first chunk only.
                 started = time.monotonic()
                 speech = await tts.synthesize(reply_text, language="hi")
-                normalized = normalize_for_asterisk_playback(speech.audio_bytes)
-                tts_ms = ms_since(started)
-                (args.out / "full_chain_reply_8k.wav").write_bytes(normalized)
+                whole_tts_ms = ms_since(started)
+                chunks = speech_chunks(reply_text, truncated=turn.finish_reason == "length")
+                started = time.monotonic()
+                first = await tts.synthesize(chunks[0], language="hi")
+                first_tts_ms = ms_since(started)
+                started = time.monotonic()
+                prepared = prepare_tts_for_playback(speech.audio_bytes, speed=settings.ai_tts_speed)
+                prep_ms = ms_since(started)
+                (args.out / "full_chain_reply_8k.wav").write_bytes(prepared)
+                timings = turn.timings
 
                 ratio = devanagari_ratio(reply_text)
                 detail = (
-                    f"heard={heard!r} | asr={asr_ms}ms rag+llm={turn_ms}ms tts={tts_ms}ms | "
+                    f"heard={heard!r} | asr={asr_ms}ms embed={timings.get('embed')}ms rag={timings.get('rag')}ms "
+                    f"llm={timings.get('llm')}ms | reply_chars={len(reply_text)} chunks={len(chunks)} | "
+                    f"time to first audio: whole-reply TTS {asr_ms + turn_ms + whole_tts_ms}ms -> "
+                    f"first-chunk TTS {asr_ms + turn_ms + first_tts_ms}ms (tts {whole_tts_ms} -> {first_tts_ms}ms, prep {prep_ms}ms) | "
                     f"rag_chunks={len(turn.retrieved_chunks)} devanagari={ratio:.0%} | reply={reply_text!r} | "
-                    f"audio={check_asterisk_wav('reply audio', normalized)}"
+                    f"audio={check_asterisk_wav('reply audio', prepared)} "
+                    f"(+ {settings.ai_end_of_speech_silence_seconds}s end-of-speech wait on a real call)"
                 )
                 record(chain_label, "PASS" if ratio >= 0.7 else "FAIL", detail)
             finally:

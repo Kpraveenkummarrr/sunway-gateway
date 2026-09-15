@@ -210,6 +210,32 @@ async def test_asr_sends_hindi_16khz_base64_wav_and_returns_devanagari_transcrip
 
 
 @pytest.mark.asyncio
+async def test_asr_uploads_speech_without_the_recordings_silence() -> None:
+    import io
+    import wave
+
+    rate = 8000
+    speech = make_tone_wav(duration_seconds=1.0, sample_rate=rate)
+    with wave.open(io.BytesIO(speech), "rb") as wf:
+        speech_frames = wf.readframes(wf.getnframes())
+    recording = io.BytesIO()
+    with wave.open(recording, "wb") as wf:  # 1 s pause, 1 s speech, 2 s end-of-speech silence
+        wf.setnchannels(1)
+        wf.setsampwidth(2)
+        wf.setframerate(rate)
+        wf.writeframes(b"\x00\x00" * rate + speech_frames + b"\x00\x00" * 2 * rate)
+
+    recorder = _Recorder(_asr_ok())
+    provider = BhashiniSTTProvider(client=_client(recorder), service_id="ai4bharat/conformer-hi-gpu--t4")
+    await provider.transcribe(recording.getvalue(), language="hi")
+
+    uploaded = read_wav_info(base64.b64decode(recorder.body["inputData"]["audio"][0]["audioContent"]))
+    assert uploaded.sample_rate == 16000
+    assert uploaded.duration_seconds == pytest.approx(1.5, abs=0.1)  # was 4.0 s untrimmed
+    assert set(recorder.body["inputData"]) == {"audio"}  # request shape unchanged
+
+
+@pytest.mark.asyncio
 async def test_asr_rejects_non_hindi_language_without_calling_api() -> None:
     recorder = _Recorder(_asr_ok())
     provider = BhashiniSTTProvider(client=_client(recorder), service_id="svc")

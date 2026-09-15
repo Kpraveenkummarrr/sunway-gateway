@@ -21,7 +21,6 @@ def _make_controller(tmp_path: Path, **overrides) -> AICallController:
         ai_test_extension="700",
         ai_language="en",
         ai_call_timeout_seconds=120,
-        ai_audio_timeout_seconds=8,
         ai_welcome_message="Hello, please ask your question.",
         rag_top_k=4,
         rag_similarity_threshold=-1.0,
@@ -344,8 +343,6 @@ async def test_too_short_recording_skips_stt_and_reprompts() -> None:
 
 @pytest.mark.asyncio
 async def test_consecutive_failures_end_call_gracefully() -> None:
-    from tests.audio_fixtures import make_silence_wav
-
     with tempfile.TemporaryDirectory() as tmp:
         tmp_path = Path(tmp)
         controller, ari = _make_controller(tmp_path, ai_max_consecutive_failures=2)
@@ -359,10 +356,10 @@ async def test_consecutive_failures_end_call_gracefully() -> None:
             recording_name = ari.recorded[-1][1]
             path = tmp_path / f"{recording_name}.wav"
             path.parent.mkdir(parents=True, exist_ok=True)
-            path.write_bytes(make_silence_wav(duration_seconds=1.0))
+            path.write_bytes(b"\xff\xfe\x00\x01not-valid-utf8")  # mock STT fails on this
             await controller.dispatch_event(recording_finished_event(recording_name))
 
-        # After hitting the cap (2 consecutive silent turns), the call
+        # After hitting the cap (2 consecutive failed turns), the call
         # should have ended itself gracefully rather than looping forever.
         assert channel_id not in controller._calls
         assert channel_id in ari.hungup
@@ -378,9 +375,77 @@ async def test_consecutive_failures_end_call_gracefully() -> None:
 
 
 @pytest.mark.asyncio
-async def test_successful_turn_resets_failure_count() -> None:
+async def test_no_input_ends_call_after_timeout() -> None:
     from tests.audio_fixtures import make_silence_wav
 
+    with tempfile.TemporaryDirectory() as tmp:
+        tmp_path = Path(tmp)
+        controller, ari = _make_controller(tmp_path, ai_no_input_timeout_seconds=2)
+        channel_id = "PJSIP/700-0000000F"
+
+        await controller.dispatch_event(stasis_start_event(channel_id))
+        state = controller._calls[channel_id]
+        call_row_id, session_id = state.call_row_id, state.session_id
+
+        recording_name = ari.recorded[-1][1]
+        (tmp_path / f"{recording_name}.wav").write_bytes(make_silence_wav(duration_seconds=1.0))
+        await controller.dispatch_event(recording_finished_event(recording_name))
+        assert channel_id in controller._calls  # 1s of 2s without input: re-prompted
+        assert state.consecutive_failures == 0  # silence is not a failed turn
+
+        recording_name = ari.recorded[-1][1]
+        (tmp_path / f"{recording_name}.wav").write_bytes(make_silence_wav(duration_seconds=1.0))
+        await controller.dispatch_event(recording_finished_event(recording_name))
+
+        assert channel_id not in controller._calls
+        assert channel_id in ari.hungup
+        async with AsyncSessionLocal() as db:
+            call_row = await db.get(Call, call_row_id)
+            assert (call_row.status, call_row.hangup_cause) == ("completed", "no_input")
+
+        await _cleanup(session_id, call_row_id)
+
+
+@pytest.mark.asyncio
+async def test_speech_resets_no_input_time() -> None:
+    from tests.audio_fixtures import make_silence_wav
+
+    with tempfile.TemporaryDirectory() as tmp:
+        tmp_path = Path(tmp)
+        controller, ari = _make_controller(tmp_path, ai_no_input_timeout_seconds=2)
+        channel_id = "PJSIP/700-00000010"
+
+        await controller.dispatch_event(stasis_start_event(channel_id))
+        state = controller._calls[channel_id]
+
+        recording_name = ari.recorded[-1][1]
+        (tmp_path / f"{recording_name}.wav").write_bytes(make_silence_wav(duration_seconds=1.5))
+        await controller.dispatch_event(recording_finished_event(recording_name))
+        assert state.silent_seconds == pytest.approx(1.5)
+
+        recording_name = ari.recorded[-1][1]
+        _write_recording(tmp_path, recording_name, "a real question")
+        await controller.dispatch_event(recording_finished_event(recording_name))
+        assert state.silent_seconds == 0.0
+        assert channel_id in controller._calls
+
+        await _cleanup(state.session_id, state.call_row_id)
+
+
+@pytest.mark.asyncio
+async def test_recording_uses_end_of_speech_and_max_turn_settings() -> None:
+    import uuid as _uuid
+
+    from app.services.call_controller import CallState
+
+    with tempfile.TemporaryDirectory() as tmp:
+        controller, ari = _make_controller(Path(tmp), ai_end_of_speech_silence_seconds=2, ai_max_turn_seconds=20)
+        await controller._start_next_recording(CallState("PJSIP/700-REC", _uuid.uuid4(), _uuid.uuid4()))
+        assert ari.record_params[-1] == {"max_silence_seconds": 2, "max_duration_seconds": 20}
+
+
+@pytest.mark.asyncio
+async def test_successful_turn_resets_failure_count() -> None:
     with tempfile.TemporaryDirectory() as tmp:
         tmp_path = Path(tmp)
         controller, ari = _make_controller(tmp_path, ai_max_consecutive_failures=2)
@@ -389,11 +454,11 @@ async def test_successful_turn_resets_failure_count() -> None:
         await controller.dispatch_event(stasis_start_event(channel_id))
         state = controller._calls[channel_id]
 
-        # One silent turn (failure 1 of 2)...
+        # One failed turn (failure 1 of 2)...
         recording_name = ari.recorded[-1][1]
         path = tmp_path / f"{recording_name}.wav"
         path.parent.mkdir(parents=True, exist_ok=True)
-        path.write_bytes(make_silence_wav(duration_seconds=1.0))
+        path.write_bytes(b"\xff\xfe\x00\x01not-valid-utf8")  # mock STT fails on this
         await controller.dispatch_event(recording_finished_event(recording_name))
         assert state.consecutive_failures == 1
 
@@ -430,8 +495,17 @@ async def test_playback_completes_before_next_recording_starts() -> None:
         _write_recording(tmp_path, recording_name, "what are your hours?")
         await controller.dispatch_event(recording_finished_event(recording_name))
 
-        # Reply was played, and only after that did the next recording start.
-        assert len(ari.played) == 2  # welcome + reply
+        from app.services.call_controller import speech_chunks
+
+        async with AsyncSessionLocal() as db:
+            reply = (
+                await db.execute(
+                    select(AIMessage).where(AIMessage.session_id == state.session_id, AIMessage.role == "agent")
+                )
+            ).scalar_one()
+
+        # Every reply chunk was played, and only after that did the next recording start.
+        assert len(ari.played) == 1 + len(speech_chunks(reply.text))  # welcome + reply chunks
         assert len(ari.recorded) == 2  # initial + next-turn
 
         await _cleanup(state.session_id, state.call_row_id)

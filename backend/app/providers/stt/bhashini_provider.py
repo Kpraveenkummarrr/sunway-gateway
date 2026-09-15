@@ -1,15 +1,17 @@
 """Bhashini (Dhruva) Hindi ASR provider.
 
 Only instantiated when STT_PROVIDER=bhashini — see app.providers.stt.factory.
-Caller audio (8kHz Asterisk recordings) is resampled to 16kHz mono 16-bit
-PCM before upload, base64-encoded, and sent as a single-task ASR pipeline.
+Caller audio (8kHz Asterisk recordings) is trimmed of leading/trailing
+silence and resampled to 16kHz mono 16-bit PCM before upload,
+base64-encoded, and sent as a single-task ASR pipeline.
 """
 
+import asyncio
 import base64
 
 from app.providers.bhashini.client import BhashiniClient, BhashiniError
 from app.providers.stt.base import STTProvider, STTProviderError, TranscriptionResult
-from app.services.audio import AudioFormatError, read_wav_info, resample_for_asr
+from app.services.audio import AudioFormatError, prepare_for_asr, read_wav_info
 
 SUPPORTED_LANGUAGE = "hi"
 
@@ -34,7 +36,9 @@ class BhashiniSTTProvider(STTProvider):
             raise STTProviderError(f"Bhashini ASR is configured for '{self._language}' only (got '{language}')")
 
         try:
-            prepared = resample_for_asr(audio_bytes)
+            # Trims the recording's leading pause and trailing end-of-speech
+            # silence, then resamples to 16kHz — less audio to upload/transcribe.
+            prepared = await asyncio.to_thread(prepare_for_asr, audio_bytes)
             duration = read_wav_info(prepared).duration_seconds
         except AudioFormatError as exc:
             raise STTProviderError(f"Caller audio is not usable PCM WAV: {exc}") from exc
