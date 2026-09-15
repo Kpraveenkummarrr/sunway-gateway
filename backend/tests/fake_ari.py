@@ -14,6 +14,11 @@ class FakeAriClient:
         self.hungup: list[str] = []
         self.fail_answer_for: set[str] = set()
         self.fail_record_for: set[str] = set()
+        # Channels that no longer exist in Asterisk (hung up / destroyed).
+        # Like real ARI, media requests on them fail with 404 "Channel not
+        # found"; every such rejected request is recorded in `rejected`.
+        self.gone: set[str] = set()
+        self.rejected: list[tuple[str, str]] = []
         # Called shortly (one event-loop tick) after each play() — real
         # Asterisk would emit a PlaybackFinished event once audio actually
         # finishes; this stands in for that so tests waiting on playback
@@ -22,7 +27,18 @@ class FakeAriClient:
         # test setup, exactly as a real PlaybackFinished event would be.
         self.on_play_started = on_play_started
 
+    def _reject_if_gone(self, operation: str, channel_id: str) -> None:
+        if channel_id in self.gone:
+            from app.services.ari_client import AriError
+
+            self.rejected.append((operation, channel_id))
+            raise AriError(
+                f'ARI POST /channels/{channel_id}/{operation} returned 404: {{"message":"Channel not found"}}',
+                status_code=404,
+            )
+
     async def answer(self, channel_id: str) -> None:
+        self._reject_if_gone("answer", channel_id)
         if channel_id in self.fail_answer_for:
             from app.services.ari_client import AriError
 
@@ -31,8 +47,10 @@ class FakeAriClient:
 
     async def hangup(self, channel_id: str, *, reason: str | None = None) -> None:
         self.hungup.append(channel_id)
+        self.gone.add(channel_id)
 
     async def play(self, channel_id: str, *, media: str) -> dict:
+        self._reject_if_gone("play", channel_id)
         self.played.append((channel_id, media))
         playback_id = f"playback-{len(self.played)}"
         if self.on_play_started is not None:
@@ -74,6 +92,7 @@ class FakeAriClient:
         max_silence_seconds: int,
         audio_format: str = "wav",
     ) -> dict:
+        self._reject_if_gone("record", channel_id)
         if channel_id in self.fail_record_for:
             from app.services.ari_client import AriError
 
@@ -102,3 +121,7 @@ def recording_finished_event(name: str, *, audio_format: str = "wav") -> dict:
 
 def hangup_event(channel_id: str) -> dict:
     return {"type": "StasisEnd", "channel": {"id": channel_id}}
+
+
+def channel_destroyed_event(channel_id: str) -> dict:
+    return {"type": "ChannelDestroyed", "channel": {"id": channel_id}}

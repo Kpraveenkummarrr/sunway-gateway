@@ -16,7 +16,12 @@ import websockets
 
 class AriError(Exception):
     """Raised for any ARI REST call failure. Never includes the
-    username/password in its message."""
+    username/password in its message. `status_code` is the HTTP status, or
+    None for transport failures."""
+
+    def __init__(self, message: str, *, status_code: int | None = None) -> None:
+        super().__init__(message)
+        self.status_code = status_code
 
 
 class AriClient:
@@ -40,7 +45,10 @@ class AriClient:
         if response.status_code >= 400:
             # ARI error bodies are small JSON docs like {"message": "..."} —
             # safe to include, never contains the auth credentials.
-            raise AriError(f"ARI {method} {path} returned {response.status_code}: {response.text}")
+            raise AriError(
+                f"ARI {method} {path} returned {response.status_code}: {response.text}",
+                status_code=response.status_code,
+            )
         return response
 
     async def answer(self, channel_id: str) -> None:

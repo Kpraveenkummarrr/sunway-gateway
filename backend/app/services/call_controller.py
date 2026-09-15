@@ -27,10 +27,18 @@ task rather than awaiting them one at a time. Without this, a slow turn
 therefore progress — for every *other* concurrent call, since they all
 share one WebSocket event stream. Per-channel state (`CallState`) is
 never shared across channels, so concurrent dispatch doesn't introduce
-cross-call races; within one channel's own lifecycle, events are still
-effectively ordered by causality (e.g. a RecordingFinished for a channel
-can only occur after that channel's own code called record(), which
-only happens after its previous step finished).
+cross-call races.
+
+Hangup is the one event a channel's own code doesn't cause: StasisEnd /
+ChannelDestroyed can arrive while that channel's StasisStart or turn task is
+still awaiting a slow provider (e.g. Bhashini TTS for the welcome). Each
+CallState therefore carries an `ended` event, set synchronously the moment
+the call finishes. In-flight STT, TTS synthesis and playback waits race
+against it and are cancelled when it fires, and every ARI media request
+(play, record) is guarded by it — so a call that has ended never gets a
+late /play or /record. A request that still loses the race by milliseconds
+gets ARI 404/409 ("channel not found" / "not in Stasis"), which is handled
+as the channel being gone, not as an error.
 """
 
 import asyncio
@@ -69,6 +77,13 @@ from app.services.conversation import (
 logger = get_logger(__name__)
 
 _RECORDING_NAME_PREFIX = "ai-agent__"
+# ARI answers "404 Channel not found" or "409 Channel not in a Stasis
+# application" once the channel has hung up / left our app.
+_CHANNEL_GONE_STATUSES = (404, 409)
+
+
+def _channel_gone(exc: AriError) -> bool:
+    return exc.status_code in _CHANNEL_GONE_STATUSES
 
 
 class CallState:
@@ -76,7 +91,10 @@ class CallState:
     id. The database (Call + AISession rows) remains the durable source of
     truth — this is just what the controller needs while the call is live
     (recording sequence number, consecutive-failure count for the retry
-    cap). Never shared across channels."""
+    cap, whether the call has ended). Never shared across channels.
+
+    call_row_id / session_id are None only while StasisStart is still
+    creating the database rows."""
 
     __slots__ = (
         "channel_id",
@@ -85,15 +103,29 @@ class CallState:
         "started_monotonic",
         "recording_seq",
         "consecutive_failures",
+        "ended",
+        "end_status",
+        "hangup_cause",
+        "records_closed",
     )
 
-    def __init__(self, channel_id: str, call_row_id: uuid.UUID, session_id: uuid.UUID) -> None:
+    def __init__(
+        self, channel_id: str, call_row_id: uuid.UUID | None = None, session_id: uuid.UUID | None = None
+    ) -> None:
         self.channel_id = channel_id
         self.call_row_id = call_row_id
         self.session_id = session_id
         self.started_monotonic = time.monotonic()
         self.recording_seq = 0
         self.consecutive_failures = 0
+        self.ended = asyncio.Event()
+        self.end_status: str | None = None
+        self.hangup_cause: str | None = None
+        self.records_closed = False
+
+    @property
+    def is_active(self) -> bool:
+        return not self.ended.is_set()
 
 
 class AICallController:
@@ -170,33 +202,53 @@ class AICallController:
         caller_number = (channel.get("caller") or {}).get("number") or None
         called_extension = (channel.get("dialplan") or {}).get("exten") or self._settings.ai_test_extension
 
-        async with self._session_factory() as db:
-            call_row = Call(
-                asterisk_channel_id=channel_id,
-                direction="inbound",
-                caller_number=caller_number,
-                called_number=called_extension,
-                status="in_progress",
-                ai_handled=True,
-                started_at=datetime.now(timezone.utc),
-            )
-            db.add(call_row)
-            await db.flush()
-
-            session = await create_session(db, language=self._settings.ai_language, call_id=call_row.id)
-            await db.commit()
-
-        state = CallState(channel_id=channel_id, call_row_id=call_row.id, session_id=session.id)
+        # Registered before the first await, so a hangup that arrives while
+        # the database rows are being created still ends this call.
+        state = CallState(channel_id=channel_id)
         self._calls[channel_id] = state
+
+        try:
+            async with self._session_factory() as db:
+                call_row = Call(
+                    asterisk_channel_id=channel_id,
+                    direction="inbound",
+                    caller_number=caller_number,
+                    called_number=called_extension,
+                    status="in_progress",
+                    ai_handled=True,
+                    started_at=datetime.now(timezone.utc),
+                )
+                db.add(call_row)
+                await db.flush()
+
+                session = await create_session(db, language=self._settings.ai_language, call_id=call_row.id)
+                await db.commit()
+        except Exception:
+            self._calls.pop(channel_id, None)
+            state.ended.set()
+            raise
+
+        state.call_row_id = call_row.id
+        state.session_id = session.id
         logger.info(
             "Call started: channel=%s call_id=%s session_id=%s", channel_id, call_row.id, session.id
         )
+        if not state.is_active:
+            # Hung up while the rows were being created: _finish_call already
+            # ran but couldn't close rows that didn't exist yet.
+            logger.info("Channel %s hung up before it was answered", channel_id)
+            await self._close_records(state)
+            return
 
         try:
             await self._ari.answer(channel_id)
-        except AriError:
-            logger.exception("Failed to answer channel %s", channel_id)
-            await self._finish_call(channel_id, status="failed", hangup_cause="answer_failed")
+        except AriError as exc:
+            if _channel_gone(exc) or not state.is_active:
+                logger.info("Channel %s hung up before it could be answered", channel_id)
+                await self._finish_call(channel_id, status="completed", hangup_cause="caller_hangup", channel_gone=True)
+            else:
+                logger.exception("Failed to answer channel %s", channel_id)
+                await self._finish_call(channel_id, status="failed", hangup_cause="answer_failed")
             return
 
         async with self._session_factory() as db:
@@ -206,7 +258,7 @@ class AICallController:
                 await db.commit()
 
         await self._play_welcome(state)
-        if state.channel_id in self._calls:  # welcome playback may have ended the call on failure
+        if state.is_active:  # the caller may hang up during the welcome
             await self._start_next_recording(state)
 
     async def _play_welcome(self, state: CallState) -> None:
@@ -218,6 +270,8 @@ class AICallController:
             # welcome prompt couldn't be played.
 
     async def _start_next_recording(self, state: CallState) -> None:
+        if not state.is_active:
+            return
         state.recording_seq += 1
         # ARI's record `name` maps directly to a filename under Asterisk's
         # recording spool dir — it does NOT create subdirectories for a
@@ -232,7 +286,11 @@ class AICallController:
                 max_duration_seconds=self._settings.ai_audio_timeout_seconds * 4,
                 max_silence_seconds=self._settings.ai_audio_timeout_seconds,
             )
-        except AriError:
+        except AriError as exc:
+            if _channel_gone(exc):
+                logger.info("Recording not started on channel %s: channel already gone", state.channel_id)
+                await self._finish_call(state.channel_id, status="completed", hangup_cause="caller_hangup", channel_gone=True)
+                return
             logger.exception("Failed to start recording on channel %s", state.channel_id)
             await self._finish_call(state.channel_id, status="failed", hangup_cause="record_failed")
 
@@ -288,6 +346,8 @@ class AICallController:
         reply_text: str | None = None
         needs_safe_error = False
         succeeded = False
+        if not state.is_active:
+            return
 
         async with self._session_factory() as db:
             session = await db.get(AISession, state.session_id)
@@ -296,11 +356,16 @@ class AICallController:
 
             stt_started = time.monotonic()
             try:
-                transcription = await self._stt_provider.transcribe(audio_bytes, language=session.language)
+                completed, transcription = await self._unless_call_ends(
+                    state, self._stt_provider.transcribe(audio_bytes, language=session.language)
+                )
             except STTProviderError as exc:
                 logger.warning("STT failed for session %s: %s", session.id, exc)
                 needs_safe_error = True
             else:
+                if not completed:
+                    logger.info("Call on channel %s ended during STT — turn abandoned", state.channel_id)
+                    return
                 logger.info(
                     "STT ok for session %s: %d chars in %dms",
                     session.id,
@@ -340,14 +405,15 @@ class AICallController:
             except TTSProviderError as exc:
                 logger.warning("TTS failed for session %s: %s", state.session_id, exc)
 
-        if state.channel_id in self._calls:
-            await self._start_next_recording(state)
+        await self._start_next_recording(state)
 
     async def _register_failure(self, state: CallState) -> bool:
         """Tracks a "bad" turn (silence, STT failure, provider failure).
         Returns True if the call was ended because the consecutive-failure
         cap was hit — callers should stop their own turn processing when
         this returns True."""
+        if not state.is_active:
+            return True
         state.consecutive_failures += 1
         if state.consecutive_failures < self._settings.ai_max_consecutive_failures:
             return False
@@ -373,8 +439,19 @@ class AICallController:
     async def _synthesize_and_play(self, state: CallState, text: str) -> None:
         if not text.strip():
             return
+        if not state.is_active:
+            logger.info("Skipping TTS for channel %s: call already ended", state.channel_id)
+            return
         tts_started = time.monotonic()
-        result = await self._tts_provider.synthesize(text, language=self._settings.ai_language)
+        completed, result = await self._unless_call_ends(
+            state, self._tts_provider.synthesize(text, language=self._settings.ai_language)
+        )
+        if not completed:
+            logger.info(
+                "Call on channel %s ended during TTS synthesis — synthesis cancelled, nothing played",
+                state.channel_id,
+            )
+            return
         tts_latency_ms = int((time.monotonic() - tts_started) * 1000)
 
         if result.audio_format == "text/mock":
@@ -415,6 +492,9 @@ class AICallController:
         # against Asterisk's data dir (/usr/share/asterisk/sounds), not the
         # spool — confirmed live: that fails with "does not exist in any
         # format" and ARI reports PlaybackFinished instantly, i.e. silence.
+        if not state.is_active:
+            logger.info("Skipping playback on channel %s: call already ended", state.channel_id)
+            return
         sound_dir = Path(self._settings.asterisk_recording_spool_path).parent / "sounds" / "ai-agent"
         sound_dir.mkdir(parents=True, exist_ok=True)
         file_stem = f"{state.session_id}-{int(time.time() * 1000)}"
@@ -424,8 +504,25 @@ class AICallController:
     async def _play_and_wait(self, state: CallState, *, media: str) -> None:
         """Starts ARI playback and waits for it to actually finish before
         returning, so the next recording doesn't start (and potentially
-        capture the AI's own voice) while audio is still playing out."""
-        playback = await self._ari.play(state.channel_id, media=media)
+        capture the AI's own voice) while audio is still playing out.
+        Never issues /play for a call that has ended, and stops waiting as
+        soon as the call ends."""
+        if not state.is_active:
+            logger.info("Skipping playback on channel %s: call already ended", state.channel_id)
+            return
+        try:
+            playback = await self._ari.play(state.channel_id, media=media)
+        except AriError as exc:
+            if not _channel_gone(exc):
+                raise
+            # Hung up in the instant between the liveness check and the request.
+            logger.info(
+                "Playback not started on channel %s: channel already gone (HTTP %s)",
+                state.channel_id,
+                exc.status_code,
+            )
+            await self._finish_call(state.channel_id, status="completed", hangup_cause="caller_hangup", channel_gone=True)
+            return
         playback_id = playback.get("id")
         if not playback_id:
             return  # can't track completion — proceed rather than hang
@@ -433,11 +530,35 @@ class AICallController:
         finished = asyncio.Event()
         self._playback_finished[playback_id] = finished
         try:
-            await asyncio.wait_for(finished.wait(), timeout=self._settings.provider_timeout_seconds)
+            completed, _ = await self._unless_call_ends(
+                state, finished.wait(), timeout=self._settings.provider_timeout_seconds
+            )
+            if not completed:
+                logger.info("Call on channel %s ended during playback %s", state.channel_id, playback_id)
         except asyncio.TimeoutError:
             logger.warning("Timed out waiting for playback %s to finish on channel %s", playback_id, state.channel_id)
         finally:
             self._playback_finished.pop(playback_id, None)
+
+    async def _unless_call_ends(self, state: CallState, awaitable, *, timeout: float | None = None):
+        """Awaits `awaitable` unless the call ends first, in which case the
+        work is cancelled and (False, None) is returned. Otherwise returns
+        (True, result); the work's own exception propagates, and
+        asyncio.TimeoutError is raised if `timeout` elapses first."""
+        work = asyncio.ensure_future(awaitable)
+        ended = asyncio.ensure_future(state.ended.wait())
+        try:
+            done, _ = await asyncio.wait({work, ended}, timeout=timeout, return_when=asyncio.FIRST_COMPLETED)
+        finally:
+            for task in (work, ended):
+                if not task.done():
+                    task.cancel()
+        if work in done:
+            return True, work.result()
+        await asyncio.wait({work})  # let the cancelled work finish unwinding (e.g. close its HTTP request)
+        if ended in done:
+            return False, None
+        raise asyncio.TimeoutError
 
     def _on_playback_finished(self, event: dict) -> None:
         playback_id = (event.get("playback") or {}).get("id")
@@ -450,32 +571,53 @@ class AICallController:
         channel_id = channel.get("id")
         if channel_id is None or channel_id not in self._calls:
             return
-        await self._finish_call(channel_id, status="completed", hangup_cause="caller_hangup")
+        await self._finish_call(channel_id, status="completed", hangup_cause="caller_hangup", channel_gone=True)
 
-    async def _finish_call(self, channel_id: str, *, status: str, hangup_cause: str) -> None:
+    async def _finish_call(
+        self, channel_id: str, *, status: str, hangup_cause: str, channel_gone: bool = False
+    ) -> None:
+        """Ends the call once. `channel_gone` means Asterisk already hung the
+        channel up (hangup event, or ARI 404/409), so no hangup request is sent."""
         state = self._calls.pop(channel_id, None)
         if state is None:
             return
 
+        # Set before any await, so every in-flight task for this call sees it
+        # immediately: pending STT/TTS/playback waits are cancelled and no
+        # further ARI media request is made for this channel.
+        state.end_status = status
+        state.hangup_cause = hangup_cause
+        state.ended.set()
+
+        if state.session_id is not None:
+            await self._close_records(state)
+        # else: StasisStart is still creating this call's rows and closes them once they exist.
+
+        if not channel_gone:
+            try:
+                await self._ari.hangup(channel_id)
+            except AriError:
+                pass  # hung up concurrently — fine
+
+        logger.info("Call finished: channel=%s status=%s cause=%s", channel_id, status, hangup_cause)
+
+    async def _close_records(self, state: CallState) -> None:
+        if state.records_closed:
+            return
+        state.records_closed = True
+
         async with self._session_factory() as db:
             session = await db.get(AISession, state.session_id)
             if session is not None and session.status == "active":
-                await end_session(db, session, status=status)
+                await end_session(db, session, status=state.end_status)
 
             call_row = await db.get(Call, state.call_row_id)
             if call_row is not None:
-                call_row.status = status
-                call_row.hangup_cause = hangup_cause
+                call_row.status = state.end_status
+                call_row.hangup_cause = state.hangup_cause
                 call_row.ended_at = datetime.now(timezone.utc)
                 call_row.duration_seconds = int(self._elapsed_seconds(state))
                 await db.commit()
-
-        try:
-            await self._ari.hangup(channel_id)
-        except AriError:
-            pass  # already gone — fine
-
-        logger.info("Call finished: channel=%s status=%s cause=%s", channel_id, status, hangup_cause)
 
     @staticmethod
     def _elapsed_seconds(state: CallState) -> float:
