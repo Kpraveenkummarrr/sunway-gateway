@@ -190,6 +190,7 @@ async def search_chunks(
                 candidates[chunk.id] = (chunk, filename, float(sim))
     if timings is not None:
         timings["rag"] = int((time.monotonic() - retrieval_started) * 1000)
+        timings["retrieval"] = timings["rag"]
 
     ranked: list[tuple[float, SearchResult]] = []
     for chunk, filename, sim in candidates.values():

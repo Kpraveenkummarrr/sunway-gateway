@@ -27,7 +27,7 @@ DEFAULT_CALLER_MESSAGES: dict[str, dict[str, str]] = {
 }
 
 # Appended to the system prompt for sessions in these languages, so the
-# LLM never drifts into English when the transcript or knowledge base
+# LLM keeps a Hindi-first voice when the transcript or knowledge-base
 # context is English or code-mixed.
 LANGUAGE_POLICIES: dict[str, str] = {
     "hi": (

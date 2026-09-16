@@ -444,7 +444,7 @@ def test_system_prompt_adds_hindi_policy_only_for_hindi() -> None:
     hindi = settings.system_prompt_for("hi")
     assert hindi.startswith("Base prompt.")
     assert LANGUAGE_POLICIES["hi"] in hindi
-    assert "Devanagari" in hindi and "markdown" in hindi
+    assert "natural, spoken Hindi" in hindi and "markdown" in hindi
     assert settings.system_prompt_for("en") == "Base prompt."
 
 
