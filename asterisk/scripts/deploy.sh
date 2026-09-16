@@ -8,6 +8,11 @@ set -euo pipefail
 ASTERISK_ETC=/etc/asterisk
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ETC="$SCRIPT_DIR/../etc"
+# Asterisk only runs AGI scripts from <astdatadir>/agi-bin (on Debian/Ubuntu
+# that is /usr/share/asterisk/agi-bin, NOT /var/lib/asterisk/agi-bin).
+AGI_BIN="${AGI_BIN:-$(asterisk -rx 'core show settings' 2>/dev/null |
+    awk -F: '/Data directory/{gsub(/[[:space:]]/, "", $2); print $2"/agi-bin"}')}"
+AGI_BIN="${AGI_BIN:-/usr/share/asterisk/agi-bin}"
 RECORDING_DIR=/var/spool/asterisk/recordings
 ARI_RECORDING_DIR=/var/spool/asterisk/recording
 
@@ -50,6 +55,14 @@ cp "$REPO_ETC"/dialplan/internal.conf "$ASTERISK_ETC/internal.conf"
 cp "$REPO_ETC"/dialplan/ivr.conf "$ASTERISK_ETC/ivr.conf"
 cp "$REPO_ETC"/dialplan/recording.conf "$ASTERISK_ETC/recording.conf"
 cp "$REPO_ETC"/dialplan/ai_agent.conf "$ASTERISK_ETC/ai_agent.conf"
+cp "$REPO_ETC"/dialplan/departments.conf "$ASTERISK_ETC/departments.conf"
+
+# Call-centre routing AGI: the dialplan asks the backend which numbers to
+# ring, so staff/routing changes need no telephony config change.
+echo "Deploying AGI scripts to $AGI_BIN..."
+mkdir -p "$AGI_BIN"
+cp "$SCRIPT_DIR/route_agi.py" "$AGI_BIN/route_agi.py"
+chmod 755 "$AGI_BIN/route_agi.py"
 
 echo "Deploying ARI config (http.conf, ari.conf)..."
 cp "$REPO_ETC"/http.conf "$ASTERISK_ETC/http.conf"

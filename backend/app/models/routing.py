@@ -1,44 +1,71 @@
 import uuid
 
-from sqlalchemy import Boolean, Integer, String
+from sqlalchemy import Boolean, ForeignKey, Integer, String, Text
 from sqlalchemy.dialects.postgresql import UUID
-from sqlalchemy.orm import Mapped, mapped_column
+from sqlalchemy.orm import Mapped, mapped_column, relationship
 
 from app.models.base import Base, TimestampMixin
 
 
-class StaffRoute(TimestampMixin, Base):
-    """Maps an IVR option (e.g. "sales") to a staff destination number.
+class Department(TimestampMixin, Base):
+    """One IVR menu option and the call-centre team behind it.
 
-    Configuration lives here, not in the Asterisk dialplan, so it can be
-    changed without touching telephony config.
+    Configuration lives here, not in the Asterisk dialplan, so departments,
+    staff numbers and fallback behaviour can be changed from the admin API
+    without touching telephony config or reloading Asterisk.
     """
 
-    __tablename__ = "staff_routes"
+    __tablename__ = "departments"
 
     id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
 
-    ivr_option: Mapped[str] = mapped_column(String(64), unique=True, index=True)
-    display_name: Mapped[str] = mapped_column(String(128))
-    staff_number: Mapped[str] = mapped_column(String(32))
+    dtmf_digit: Mapped[str] = mapped_column(String(1), unique=True, index=True)
+    name: Mapped[str] = mapped_column(String(128))
+    description: Mapped[str | None] = mapped_column(Text, nullable=True)
+
+    # Seconds to ring each destination before moving to the next one.
+    ring_timeout_seconds: Mapped[int] = mapped_column(Integer, default=25)
+    # What happens once every destination has been tried without an answer:
+    # "ai" (hand to the AI agent) | "fallback_number" | "hangup".
+    no_answer_action: Mapped[str] = mapped_column(String(32), default="ai")
     fallback_number: Mapped[str | None] = mapped_column(String(32), nullable=True)
 
-    # Preferred outbound GSM channel for this route, if the SMG4004 supports
-    # per-route channel selection. REQUIRES PHYSICAL SMG4004 to confirm.
-    preferred_gsm_channel_id: Mapped[uuid.UUID | None] = mapped_column(
-        UUID(as_uuid=True), nullable=True
+    enabled: Mapped[bool] = mapped_column(Boolean, default=True)
+
+    agents: Mapped[list["Agent"]] = relationship(
+        back_populates="department", cascade="all, delete-orphan", order_by="Agent.priority"
     )
 
-    ring_timeout_seconds: Mapped[int] = mapped_column(Integer, default=25)
-    enabled: Mapped[bool] = mapped_column(Boolean, default=True)
+
+class Agent(TimestampMixin, Base):
+    """A staff member who takes calls for a department.
+
+    Destinations are tried in `priority` order (lowest first); each agent's
+    backup number is tried immediately after their own number.
+    """
+
+    __tablename__ = "agents"
+
+    id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
+    department_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True), ForeignKey("departments.id", ondelete="CASCADE"), index=True
+    )
+
+    name: Mapped[str] = mapped_column(String(128))
+    phone_number: Mapped[str] = mapped_column(String(32))
+    backup_number: Mapped[str | None] = mapped_column(String(32), nullable=True)
+
+    priority: Mapped[int] = mapped_column(Integer, default=100)
+    active: Mapped[bool] = mapped_column(Boolean, default=True)
+
+    department: Mapped["Department"] = relationship(back_populates="agents")
 
 
 class GsmChannel(TimestampMixin, Base):
-    """One physical GSM channel/SIM slot on the SMG4004.
+    """One physical GSM channel/SIM slot on the gateway.
 
-    REQUIRES PHYSICAL SMG4004 — populated once the gateway is available and
-    its channel/SIM layout is known; never assumed in advance beyond the
-    configured channel count.
+    Populated once the gateway is available and its channel/SIM layout is
+    known; never assumed in advance beyond the configured channel count.
     """
 
     __tablename__ = "gsm_channels"
