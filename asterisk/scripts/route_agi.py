@@ -60,6 +60,11 @@ def log(message: str) -> None:
     agi_command(f'VERBOSE "route_agi: {message}" 1')
 
 
+def attempt_channel_id(env: dict) -> str:
+    """Return the identifier used by the backend's Call row lookup."""
+    return env.get("agi_channel") or env.get("agi_uniqueid", "")
+
+
 def load_settings() -> tuple[str, str]:
     api_url = os.environ.get("SUNWAY_API_URL", "")
     api_key = os.environ.get("INTERNAL_API_KEY", "")
@@ -116,13 +121,19 @@ def publish_route(digit: str, api_url: str, api_key: str) -> None:
 
 def publish_attempt(args: list[str], env: dict, api_url: str, api_key: str) -> None:
     index, number, dialstatus = (args + ["", "", ""])[:3]
+    log(f"attempt {index} to {number} -> {dialstatus}")
+    # ARI stores calls by channel id (for example PJSIP/...-00000001),
+    # whereas agi_uniqueid is only the call's numeric unique ID.  Prefer the
+    # channel identifier so attempt events attach to the existing Call row;
+    # retain uniqueid as a compatibility fallback for older/custom dialplans.
+    channel_id = attempt_channel_id(env)
     request(
         "POST",
         "/api/callcentre/route/attempts",
         api_url,
         api_key,
         {
-            "channel_id": env.get("agi_uniqueid", ""),
+            "channel_id": channel_id,
             "number": number,
             "attempt": int(index) if str(index).isdigit() else 1,
             "result": {"ANSWER": "answered", "NOANSWER": "noanswer", "BUSY": "busy"}.get(

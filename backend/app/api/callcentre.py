@@ -356,6 +356,16 @@ async def route_for_digit(dtmf_digit: str, db: AsyncSession = Depends(get_db)) -
 async def report_attempt(body: AttemptIn, db: AsyncSession = Depends(get_db)) -> dict:
     from app.services.call_routing import DialTarget
 
+    # Logged for every attempt, including calls with no Call row (softphone
+    # tests), so the dialled sequence is always visible in the worker log.
+    logger.info(
+        "Routing attempt %d on channel %s: %s (%s) -> %s",
+        body.attempt,
+        body.channel_id or "unknown",
+        body.number,
+        body.label or body.kind,
+        body.result,
+    )
     event = await record_routing_attempt(
         db,
         channel_id=body.channel_id,
