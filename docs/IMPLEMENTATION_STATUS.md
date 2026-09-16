@@ -1,7 +1,7 @@
 # Implementation Status
 
 Status of every functional area in the architecture document, as of
-2026-09-16. Honest by rule: **DONE** means built *and* tested; **PARTIAL**
+2026-09-16 (admin panel added). Honest by rule: **DONE** means built *and* tested; **PARTIAL**
 means usable but incomplete; **NOT BUILT** means not started; **BLOCKED**
 means it needs hardware, credentials or client input that is not available.
 
@@ -23,15 +23,15 @@ tested on the client machine, not here.
 | 10 | Concurrent calls | Per-channel state, isolated AI sessions | `call_controller.py` | PARTIAL — isolation tested; real multi-channel GSM load not tested |
 | 12 | Server/PBX components | Ubuntu, Asterisk 18.10, Python/FastAPI, PostgreSQL + pgvector | `docs/production-deployment.md` | DONE |
 | 13 | SMG ↔ server SIP/RTP | Working on the client LAN | — | DONE (client machine) |
-| 14 | Security | Internal API key, firewall script, no secrets in git | `scripts/setup_firewall.sh`, `app/core/security.py` | PARTIAL — no Fail2Ban, TLS, outbound whitelist or roles yet |
+| 14 | Security | Admin password login (signed session) or API key, firewall script, audit trail, no secrets in git | `app/core/admin_auth.py`, `scripts/setup_firewall.sh` | PARTIAL — no Fail2Ban, TLS, outbound whitelist or roles yet |
 | 15 | Development phases | Phases 1–8 delivered | — | PARTIAL |
 | 16 | Testing T-01..T-18 | See table below | `backend/tests/` | PARTIAL |
 | 17 | Deployment plan | Production runbook + systemd units | `docs/production-deployment.md`, `scripts/systemd/` | DONE |
 | 18 | Client information required | Outstanding items tracked | `docs/client-information-required.md` | BLOCKED on client |
-| — | Call centre (departments, agents, fallback, history) | Full model, API, routing, dialplan, call history | `app/api/callcentre.py`, `app/models/routing.py` | DONE (admin GUI still to build) |
-| — | Admin GUI | — | — | NOT BUILT |
+| — | Call centre (departments, agents, fallback, history) | Full model, API, routing, dialplan, call history | `app/api/callcentre.py`, `app/models/routing.py` | DONE — managed from the admin panel |
+| — | Admin GUI | Dashboard, departments, staff, routing, call history, knowledge base, AI settings, health, audit — all wired to the real backend | `app/api/admin.py`, `app/static/admin.html`, `app/services/system_config.py`, `app/services/system_health.py` | DONE (KB versioning/re-index and role-based users still missing) |
 | — | AI → human transfer | — | — | NOT BUILT |
-| — | Monitoring/health endpoints | `/health`, `/ready` only | `app/api/health.py` | PARTIAL |
+| — | Monitoring/health endpoints | `/health`, `/ready`, plus measured Asterisk/worker/SIP/resource checks | `app/api/health.py`, `app/services/system_health.py` | PARTIAL — no metrics history or alerting yet |
 | — | Hindi voice quality/expressiveness | Anti-aliased audio, configurable speed, Hindi-only prompt | `app/services/audio.py`, `app/core/config.py` | PARTIAL — needs live tuning with the real voice |
 
 ## T-01 – T-18
@@ -58,16 +58,15 @@ tested on the client machine, not here.
 | T-15 | Concurrent calls | PARTIAL | Session isolation tested in code; real 4+ channel GSM test BLOCKED |
 | T-16 | 30-minute stability | NOT RUN | — |
 | T-17 | SIP security / Fail2Ban | NOT RUN | Fail2Ban not configured yet |
-| T-18 | PDF update | PARTIAL | Upload/delete tested; re-index and activation NOT BUILT |
+| T-18 | PDF update | PARTIAL | Upload/delete tested and exposed in the admin panel; re-index and activation NOT BUILT |
 
 ## Next, in priority order
 
-1. **Admin GUI** — dashboard, departments/staff, knowledge base, AI settings.
-2. **AI → human transfer** — a real ARI bridge to a staff member, not just a
+1. **AI → human transfer** — a real ARI bridge to a staff member, not just a
    spoken promise.
-3. **Knowledge base management** — versions, activate/deactivate, re-index,
+2. **Knowledge base management** — versions, activate/deactivate, re-index,
    and the 20-question accuracy set (T-10).
-4. **Security** — Fail2Ban, outbound number whitelist, call duration cap.
-5. **Monitoring** — worker/gateway health, latency and error counters.
-6. **On the client machine** — live Hindi voice tuning (T-09, T-11, T-12),
+3. **Security** — Fail2Ban, outbound number whitelist, call duration cap.
+4. **Monitoring** — worker/gateway health, latency and error counters.
+5. **On the client machine** — live Hindi voice tuning (T-09, T-11, T-12),
    GSM tests (T-01/T-02/T-05–T-07), concurrency (T-15), stability (T-16).

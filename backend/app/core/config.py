@@ -117,6 +117,10 @@ class Settings(BaseSettings):
 
     internal_api_key: str = ""
 
+    # Admin panel login. Leave empty to disable password login (the panel
+    # then only accepts the internal API key).
+    admin_password: str = ""
+
     llm_provider: str = ""
     llm_api_key: str = ""
     llm_model: str = ""
@@ -199,6 +203,12 @@ class Settings(BaseSettings):
     ivr_max_retries: int = 3
 
     wireguard_interface: str = "wg0"
+
+    @property
+    def session_signing_key(self) -> str:
+        """Key for signing admin session cookies. Falls back to the internal
+        API key so sessions are still signed if APP_SECRET_KEY is unset."""
+        return self.app_secret_key or self.internal_api_key or "sunway-dev-unsigned"
 
     def caller_message(self, kind: str) -> str:
         """`kind` is "welcome", "error", or "goodbye"."""

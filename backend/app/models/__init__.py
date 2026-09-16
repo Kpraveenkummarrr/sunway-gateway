@@ -3,7 +3,7 @@ from app.models.base import Base
 from app.models.calls import Call, CallEvent, IVRSelection, Recording
 from app.models.knowledge import KnowledgeChunk, KnowledgeDocument
 from app.models.routing import Agent, Department, GsmChannel
-from app.models.system import SystemLog
+from app.models.system import AuditLog, SystemConfig, SystemLog
 
 __all__ = [
     "Base",
@@ -19,4 +19,6 @@ __all__ = [
     "KnowledgeDocument",
     "KnowledgeChunk",
     "SystemLog",
+    "SystemConfig",
+    "AuditLog",
 ]

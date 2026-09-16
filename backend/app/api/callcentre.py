@@ -6,7 +6,8 @@ Two kinds of consumer:
     to find out which numbers to ring, in order (see
     asterisk/scripts/route_agi.py).
 
-Everything is behind the internal API key, the same as the knowledge API.
+Everything is behind admin authentication: an admin panel session cookie or
+the internal API key (see app.core.admin_auth).
 """
 
 from datetime import datetime, timedelta, timezone
@@ -18,12 +19,13 @@ from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload
 
+from app.core.admin_auth import require_admin
 from app.core.db import get_db
 from app.core.logging import get_logger
-from app.core.security import require_internal_api_key
 from app.models.ai import AISession
 from app.models.calls import Call, CallEvent
 from app.models.routing import Agent, Department
+from app.services.system_config import record_audit
 from app.services.call_routing import (
     NO_ANSWER_ACTIONS,
     build_plan,
@@ -32,9 +34,7 @@ from app.services.call_routing import (
     resolve_routing,
 )
 
-router = APIRouter(
-    prefix="/api/callcentre", tags=["call centre"], dependencies=[Depends(require_internal_api_key)]
-)
+router = APIRouter(prefix="/api/callcentre", tags=["call centre"], dependencies=[Depends(require_admin)])
 logger = get_logger(__name__)
 
 
@@ -46,6 +46,7 @@ class AgentIn(BaseModel):
     phone_number: str = Field(min_length=1, max_length=32)
     backup_number: str | None = Field(default=None, max_length=32)
     priority: int = 100
+    ring_timeout_seconds: int | None = Field(default=None, ge=5, le=120)
     active: bool = True
 
 
@@ -54,6 +55,7 @@ class AgentUpdate(BaseModel):
     phone_number: str | None = Field(default=None, min_length=1, max_length=32)
     backup_number: str | None = Field(default=None, max_length=32)
     priority: int | None = None
+    ring_timeout_seconds: int | None = Field(default=None, ge=5, le=120)
     active: bool | None = None
 
 
@@ -64,6 +66,7 @@ class AgentOut(BaseModel):
     phone_number: str
     backup_number: str | None
     priority: int
+    ring_timeout_seconds: int | None
     active: bool
 
     @classmethod
@@ -75,6 +78,7 @@ class AgentOut(BaseModel):
             phone_number=agent.phone_number,
             backup_number=agent.backup_number,
             priority=agent.priority,
+            ring_timeout_seconds=agent.ring_timeout_seconds,
             active=agent.active,
         )
 
@@ -194,7 +198,9 @@ async def _get_department_or_404(db: AsyncSession, department_id: UUID) -> Depar
 
 
 @router.post("/departments", response_model=DepartmentOut, status_code=status.HTTP_201_CREATED)
-async def create_department(body: DepartmentIn, db: AsyncSession = Depends(get_db)) -> DepartmentOut:
+async def create_department(
+    body: DepartmentIn, db: AsyncSession = Depends(get_db), actor: str = Depends(require_admin)
+) -> DepartmentOut:
     _validate_no_answer_action(body.no_answer_action)
     if await get_department(db, body.dtmf_digit) is not None:
         raise HTTPException(status.HTTP_409_CONFLICT, detail=f"Digit {body.dtmf_digit} is already in use")
@@ -203,6 +209,10 @@ async def create_department(body: DepartmentIn, db: AsyncSession = Depends(get_d
     db.add(department)
     await db.commit()
     await db.refresh(department, attribute_names=["agents"])
+    await record_audit(
+        db, action="created", entity="department", entity_id=str(department.id),
+        detail={"dtmf_digit": department.dtmf_digit, "name": department.name}, actor=actor,
+    )
     logger.info("Department created: digit=%s name=%s", department.dtmf_digit, department.name)
     return DepartmentOut.from_model(department)
 
@@ -224,7 +234,10 @@ async def get_one_department(department_id: UUID, db: AsyncSession = Depends(get
 
 @router.patch("/departments/{department_id}", response_model=DepartmentOut)
 async def update_department(
-    department_id: UUID, body: DepartmentUpdate, db: AsyncSession = Depends(get_db)
+    department_id: UUID,
+    body: DepartmentUpdate,
+    db: AsyncSession = Depends(get_db),
+    actor: str = Depends(require_admin),
 ) -> DepartmentOut:
     department = await _get_department_or_404(db, department_id)
     changes = body.model_dump(exclude_unset=True)
@@ -239,15 +252,22 @@ async def update_department(
         setattr(department, attribute, value)
     await db.commit()
     await db.refresh(department, attribute_names=["agents"])
+    await record_audit(
+        db, action="updated", entity="department", entity_id=str(department_id),
+        detail={k: str(v)[:100] for k, v in changes.items()}, actor=actor,
+    )
     logger.info("Department updated: id=%s fields=%s", department_id, sorted(changes))
     return DepartmentOut.from_model(department)
 
 
 @router.delete("/departments/{department_id}", status_code=status.HTTP_204_NO_CONTENT)
-async def delete_department(department_id: UUID, db: AsyncSession = Depends(get_db)) -> None:
+async def delete_department(
+    department_id: UUID, db: AsyncSession = Depends(get_db), actor: str = Depends(require_admin)
+) -> None:
     department = await _get_department_or_404(db, department_id)
     await db.delete(department)
     await db.commit()
+    await record_audit(db, action="deleted", entity="department", entity_id=str(department_id), actor=actor)
     logger.info("Department deleted: id=%s", department_id)
 
 
@@ -255,12 +275,18 @@ async def delete_department(department_id: UUID, db: AsyncSession = Depends(get_
 
 
 @router.post("/departments/{department_id}/agents", response_model=AgentOut, status_code=status.HTTP_201_CREATED)
-async def create_agent(department_id: UUID, body: AgentIn, db: AsyncSession = Depends(get_db)) -> AgentOut:
+async def create_agent(
+    department_id: UUID, body: AgentIn, db: AsyncSession = Depends(get_db), actor: str = Depends(require_admin)
+) -> AgentOut:
     await _get_department_or_404(db, department_id)
     agent = Agent(department_id=department_id, **body.model_dump())
     db.add(agent)
     await db.commit()
     await db.refresh(agent)
+    await record_audit(
+        db, action="created", entity="agent", entity_id=str(agent.id),
+        detail={"name": agent.name, "department_id": str(department_id)}, actor=actor,
+    )
     logger.info("Agent created: department=%s name=%s", department_id, agent.name)
     return AgentOut.from_model(agent)
 
@@ -276,7 +302,9 @@ async def list_agents(
 
 
 @router.patch("/agents/{agent_id}", response_model=AgentOut)
-async def update_agent(agent_id: UUID, body: AgentUpdate, db: AsyncSession = Depends(get_db)) -> AgentOut:
+async def update_agent(
+    agent_id: UUID, body: AgentUpdate, db: AsyncSession = Depends(get_db), actor: str = Depends(require_admin)
+) -> AgentOut:
     agent = await db.get(Agent, agent_id)
     if agent is None:
         raise HTTPException(status.HTTP_404_NOT_FOUND, detail="Agent not found")
@@ -285,17 +313,24 @@ async def update_agent(agent_id: UUID, body: AgentUpdate, db: AsyncSession = Dep
         setattr(agent, attribute, value)
     await db.commit()
     await db.refresh(agent)
+    await record_audit(
+        db, action="updated", entity="agent", entity_id=str(agent_id),
+        detail={k: str(v)[:100] for k, v in changes.items()}, actor=actor,
+    )
     logger.info("Agent updated: id=%s fields=%s", agent_id, sorted(changes))
     return AgentOut.from_model(agent)
 
 
 @router.delete("/agents/{agent_id}", status_code=status.HTTP_204_NO_CONTENT)
-async def delete_agent(agent_id: UUID, db: AsyncSession = Depends(get_db)) -> None:
+async def delete_agent(
+    agent_id: UUID, db: AsyncSession = Depends(get_db), actor: str = Depends(require_admin)
+) -> None:
     agent = await db.get(Agent, agent_id)
     if agent is None:
         raise HTTPException(status.HTTP_404_NOT_FOUND, detail="Agent not found")
     await db.delete(agent)
     await db.commit()
+    await record_audit(db, action="deleted", entity="agent", entity_id=str(agent_id), actor=actor)
     logger.info("Agent deleted: id=%s", agent_id)
 
 

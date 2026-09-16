@@ -73,6 +73,7 @@ from app.services.audio import (
     prepare_tts_for_playback,
     read_wav_info,
 )
+from app.services.system_config import effective_settings
 from app.services.conversation import (
     ConversationError,
     ConversationTimeoutError,
@@ -202,6 +203,9 @@ class AICallController:
         tts_provider: TTSProvider,
     ) -> None:
         self._ari = ari
+        # Environment defaults; admin-panel overrides are applied on top of
+        # these at the start of each call (see _refresh_settings).
+        self._base_settings = settings
         self._settings = settings
         self._session_factory = session_factory
         self._embedding_provider = embedding_provider
@@ -303,6 +307,7 @@ class AICallController:
             state.ended.set()
             raise
 
+        await self._refresh_settings()
         state.call_row_id = call_row.id
         state.session_id = session.id
         logger.info(
@@ -335,6 +340,22 @@ class AICallController:
         await self._play_welcome(state)
         if state.is_active:  # the caller may hang up during the welcome
             await self._start_next_recording(state)
+
+    async def _refresh_settings(self) -> None:
+        """Picks up settings changed in the admin panel, so a change takes
+        effect on the next call without restarting the worker. A failure
+        here must never fail the call — the previous settings stay in use."""
+        try:
+            async with self._session_factory() as db:
+                updated = await effective_settings(db, self._base_settings)
+        except Exception:  # noqa: BLE001 - config refresh is best effort
+            logger.exception("Could not refresh runtime settings; keeping the current ones")
+            return
+        if updated != self._settings:
+            logger.info("Runtime settings changed in the admin panel — applied to this call")
+            # Re-rendered phrases: a changed welcome/speed must not serve stale audio.
+            self._phrase_clips.clear()
+        self._settings = updated
 
     async def _play_welcome(self, state: CallState) -> None:
         try:

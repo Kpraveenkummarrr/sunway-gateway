@@ -1,0 +1,432 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Sunway Gateway — Admin</title>
+<style>
+  :root {
+    --bg: #f4f6f8; --panel: #fff; --ink: #16202a; --muted: #5b6b7a;
+    --line: #dfe5ea; --accent: #1f6feb; --ok: #157347; --warn: #9a6700; --bad: #b42318;
+  }
+  * { box-sizing: border-box; }
+  body { margin: 0; font: 14px/1.5 system-ui, -apple-system, "Segoe UI", sans-serif; background: var(--bg); color: var(--ink); }
+  header { background: #16202a; color: #fff; padding: 14px 20px; display: flex; align-items: center; gap: 16px; }
+  header h1 { font-size: 16px; margin: 0; font-weight: 600; }
+  header .spacer { flex: 1; }
+  nav { display: flex; gap: 4px; padding: 10px 20px; background: #fff; border-bottom: 1px solid var(--line); flex-wrap: wrap; }
+  nav button { border: 1px solid transparent; background: none; padding: 7px 13px; border-radius: 6px; cursor: pointer; color: var(--muted); font: inherit; }
+  nav button.active { background: #eaf1fd; color: var(--accent); border-color: #cfe0fb; font-weight: 600; }
+  main { padding: 20px; max-width: 1180px; }
+  section { display: none; }
+  section.active { display: block; }
+  .cards { display: grid; grid-template-columns: repeat(auto-fill, minmax(190px, 1fr)); gap: 12px; margin-bottom: 20px; }
+  .card { background: var(--panel); border: 1px solid var(--line); border-radius: 10px; padding: 14px; }
+  .card .label { color: var(--muted); font-size: 12px; text-transform: uppercase; letter-spacing: .04em; }
+  .card .value { font-size: 26px; font-weight: 600; margin-top: 6px; }
+  .panel { background: var(--panel); border: 1px solid var(--line); border-radius: 10px; padding: 16px; margin-bottom: 18px; }
+  .panel h2 { margin: 0 0 12px; font-size: 15px; }
+  table { width: 100%; border-collapse: collapse; }
+  th, td { text-align: left; padding: 8px 10px; border-bottom: 1px solid var(--line); vertical-align: top; }
+  th { color: var(--muted); font-size: 12px; text-transform: uppercase; letter-spacing: .03em; }
+  input, select, textarea, button.action { font: inherit; padding: 7px 9px; border: 1px solid var(--line); border-radius: 6px; background: #fff; }
+  textarea { width: 100%; min-height: 90px; }
+  button.action { cursor: pointer; background: var(--accent); color: #fff; border-color: var(--accent); }
+  button.action.secondary { background: #fff; color: var(--ink); border-color: var(--line); }
+  button.action.danger { background: #fff; color: var(--bad); border-color: #f0c2bd; }
+  .row { display: flex; gap: 8px; flex-wrap: wrap; align-items: end; margin-bottom: 12px; }
+  .field { display: flex; flex-direction: column; gap: 4px; }
+  .field label { font-size: 12px; color: var(--muted); }
+  .pill { display: inline-block; padding: 2px 8px; border-radius: 999px; font-size: 12px; border: 1px solid; }
+  .pill.ok { color: var(--ok); border-color: #b7e0c4; background: #eaf7ee; }
+  .pill.bad { color: var(--bad); border-color: #f3c2bd; background: #fdeeec; }
+  .pill.unknown { color: var(--warn); border-color: #f0dfae; background: #fdf6e3; }
+  .muted { color: var(--muted); }
+  #toast { position: fixed; right: 18px; bottom: 18px; background: #16202a; color: #fff; padding: 10px 14px; border-radius: 8px; display: none; max-width: 380px; }
+  #login { max-width: 340px; margin: 80px auto; }
+</style>
+</head>
+<body>
+<header>
+  <h1>Sunway Gateway — Admin</h1>
+  <span class="spacer"></span>
+  <span id="whoami" class="muted"></span>
+  <button class="action secondary" id="logout" hidden>Sign out</button>
+</header>
+
+<div id="login" class="panel" hidden>
+  <h2>Sign in</h2>
+  <div class="field"><label for="password">Admin password</label><input id="password" type="password" autocomplete="current-password"></div>
+  <p><button class="action" id="loginBtn">Sign in</button></p>
+  <p class="muted" id="loginHint"></p>
+</div>
+
+<div id="app" hidden>
+<nav>
+  <button data-tab="dashboard" class="active">Dashboard</button>
+  <button data-tab="departments">Departments</button>
+  <button data-tab="agents">Staff</button>
+  <button data-tab="routing">Routing</button>
+  <button data-tab="calls">Call history</button>
+  <button data-tab="knowledge">Knowledge base</button>
+  <button data-tab="ai">AI settings</button>
+  <button data-tab="system">System health</button>
+  <button data-tab="audit">Audit</button>
+</nav>
+
+<main>
+  <section id="dashboard" class="active">
+    <div class="cards" id="statCards"></div>
+    <div class="panel"><h2>Services</h2><div id="serviceStatus">Loading…</div></div>
+  </section>
+
+  <section id="departments">
+    <div class="panel">
+      <h2>Add department</h2>
+      <div class="row">
+        <div class="field"><label>DTMF digit (1–8)</label><input id="d_digit" maxlength="1" size="2"></div>
+        <div class="field"><label>Name</label><input id="d_name"></div>
+        <div class="field"><label>Ring timeout (s)</label><input id="d_timeout" type="number" value="25" min="5" max="120"></div>
+        <div class="field"><label>No answer</label>
+          <select id="d_action"><option value="ai">Hand to AI</option><option value="fallback_number">Fallback number</option><option value="hangup">Say goodbye</option></select>
+        </div>
+        <div class="field"><label>Fallback number</label><input id="d_fallback"></div>
+        <button class="action" id="d_add">Add</button>
+      </div>
+    </div>
+    <div class="panel"><h2>Departments</h2><table><thead><tr><th>Digit</th><th>Name</th><th>Ring</th><th>No answer</th><th>Staff</th><th>Status</th><th></th></tr></thead><tbody id="deptRows"></tbody></table></div>
+  </section>
+
+  <section id="agents">
+    <div class="panel">
+      <h2>Add staff member</h2>
+      <div class="row">
+        <div class="field"><label>Department</label><select id="a_dept"></select></div>
+        <div class="field"><label>Name</label><input id="a_name"></div>
+        <div class="field"><label>Mobile</label><input id="a_number"></div>
+        <div class="field"><label>Backup mobile</label><input id="a_backup"></div>
+        <div class="field"><label>Priority</label><input id="a_priority" type="number" value="100"></div>
+        <div class="field"><label>Ring timeout (s)</label><input id="a_timeout" type="number" min="5" max="120" placeholder="dept"></div>
+        <button class="action" id="a_add">Add</button>
+      </div>
+    </div>
+    <div class="panel"><h2>Staff</h2><table><thead><tr><th>Name</th><th>Department</th><th>Mobile</th><th>Backup</th><th>Priority</th><th>Ring</th><th>Status</th><th></th></tr></thead><tbody id="agentRows"></tbody></table></div>
+  </section>
+
+  <section id="routing">
+    <div class="panel"><h2>What each key does</h2><p class="muted">Live from the call-centre configuration — this is exactly what the dialplan will do.</p>
+      <table><thead><tr><th>Key</th><th>Destination</th><th>Ring order</th><th>No answer</th><th>Status</th></tr></thead><tbody id="routingRows"></tbody></table>
+    </div>
+  </section>
+
+  <section id="calls">
+    <div class="panel"><h2>Recent calls</h2>
+      <table><thead><tr><th>Started</th><th>Caller</th><th>To</th><th>Status</th><th>Handled by</th><th>Duration</th><th></th></tr></thead><tbody id="callRows"></tbody></table>
+    </div>
+    <div class="panel" id="callDetail" hidden><h2>Call timeline</h2><table><thead><tr><th>At</th><th>Event</th><th>Detail</th></tr></thead><tbody id="eventRows"></tbody></table></div>
+  </section>
+
+  <section id="knowledge">
+    <div class="panel"><h2>Upload a PDF</h2>
+      <div class="row"><input type="file" id="kb_file" accept="application/pdf"><button class="action" id="kb_upload">Upload</button></div>
+      <p class="muted">The document is chunked and embedded on upload; status appears below.</p>
+    </div>
+    <div class="panel"><h2>Documents</h2><table><thead><tr><th>File</th><th>Status</th><th>Pages</th><th>Chunks</th><th></th></tr></thead><tbody id="kbRows"></tbody></table></div>
+  </section>
+
+  <section id="ai">
+    <div class="panel"><h2>Providers</h2><div id="providers" class="muted"></div></div>
+    <div class="panel"><h2>Conversation settings</h2><div id="aiFields"></div>
+      <p><button class="action" id="ai_save">Save settings</button> <span class="muted">Applies to the next call — no restart.</span></p>
+    </div>
+  </section>
+
+  <section id="system">
+    <div class="panel"><h2>Services</h2><div id="systemChecks">Loading…</div></div>
+    <div class="panel"><h2>Resources</h2><div id="systemResources"></div></div>
+  </section>
+
+  <section id="audit">
+    <div class="panel"><h2>Configuration changes</h2><table><thead><tr><th>When</th><th>Who</th><th>Action</th><th>Entity</th><th>Detail</th></tr></thead><tbody id="auditRows"></tbody></table></div>
+  </section>
+</main>
+</div>
+
+<div id="toast"></div>
+
+<script>
+const $ = (id) => document.getElementById(id);
+const esc = (v) => String(v ?? "").replace(/[&<>"']/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c]));
+const fmtTime = (v) => v ? new Date(v).toLocaleString() : "—";
+
+function toast(message, bad) {
+  const el = $("toast");
+  el.textContent = message;
+  el.style.background = bad ? "#b42318" : "#16202a";
+  el.style.display = "block";
+  setTimeout(() => (el.style.display = "none"), 3200);
+}
+
+async function api(path, options = {}) {
+  const response = await fetch(path, { credentials: "same-origin", ...options });
+  if (response.status === 401) { showLogin(); throw new Error("Not signed in"); }
+  if (!response.ok) {
+    let detail = `HTTP ${response.status}`;
+    try { detail = (await response.json()).detail || detail; } catch {}
+    throw new Error(typeof detail === "string" ? detail : JSON.stringify(detail));
+  }
+  return response.status === 204 ? null : response.json();
+}
+
+const json = (body) => ({ method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(body) });
+const patch = (body) => ({ method: "PATCH", headers: { "Content-Type": "application/json" }, body: JSON.stringify(body) });
+
+function showLogin() { $("login").hidden = false; $("app").hidden = true; $("logout").hidden = true; }
+function showApp() { $("login").hidden = true; $("app").hidden = false; $("logout").hidden = false; load("dashboard"); }
+
+// ---- tabs ----
+document.querySelectorAll("nav button").forEach((button) => {
+  button.onclick = () => {
+    document.querySelectorAll("nav button").forEach((b) => b.classList.toggle("active", b === button));
+    document.querySelectorAll("section").forEach((s) => s.classList.toggle("active", s.id === button.dataset.tab));
+    load(button.dataset.tab);
+  };
+});
+
+// ---- dashboard ----
+async function loadDashboard() {
+  const [stats, health] = await Promise.all([api("/api/callcentre/stats?hours=24"), api("/api/admin/health")]);
+  const cards = [
+    ["Active calls", stats.active_calls],
+    ["Calls (24h)", stats.total_calls],
+    ["Completed", stats.by_status?.completed ?? 0],
+    ["Failed", stats.by_status?.failed ?? 0],
+    ["AI calls", stats.ai_calls],
+    ["Forwarded to staff", stats.staff_calls],
+    ["Avg call duration", stats.average_duration_seconds != null ? stats.average_duration_seconds + "s" : "—"],
+    ["AI sessions", stats.ai_sessions],
+  ];
+  $("statCards").innerHTML = cards.map(([label, value]) =>
+    `<div class="card"><div class="label">${esc(label)}</div><div class="value">${esc(value)}</div></div>`).join("");
+  $("serviceStatus").innerHTML = renderChecks(health.checks);
+}
+
+function pill(ok) {
+  if (ok === true) return '<span class="pill ok">OK</span>';
+  if (ok === false) return '<span class="pill bad">Down</span>';
+  return '<span class="pill unknown">Unknown</span>';
+}
+
+function renderChecks(checks) {
+  return `<table><tbody>${Object.entries(checks).map(([name, check]) =>
+    `<tr><td style="width:170px">${esc(name.replace(/_/g, " "))}</td><td style="width:90px">${pill(check.ok)}</td><td class="muted">${esc(check.detail)}</td></tr>`).join("")}</tbody></table>`;
+}
+
+// ---- departments ----
+async function loadDepartments() {
+  const departments = await api("/api/callcentre/departments");
+  $("deptRows").innerHTML = departments.map((d) => `<tr>
+    <td><strong>${esc(d.dtmf_digit)}</strong></td>
+    <td>${esc(d.name)}</td>
+    <td>${esc(d.ring_timeout_seconds)}s</td>
+    <td>${esc(d.no_answer_action)}${d.fallback_number ? " → " + esc(d.fallback_number) : ""}</td>
+    <td>${d.agents.length}</td>
+    <td>${d.enabled ? '<span class="pill ok">Active</span>' : '<span class="pill unknown">Inactive</span>'}</td>
+    <td><button class="action secondary" data-toggle-dept="${d.id}" data-enabled="${d.enabled}">${d.enabled ? "Disable" : "Enable"}</button>
+        <button class="action danger" data-del-dept="${d.id}">Delete</button></td></tr>`).join("") ||
+    `<tr><td colspan="7" class="muted">No departments yet — add one above.</td></tr>`;
+
+  $("deptRows").querySelectorAll("[data-toggle-dept]").forEach((b) => b.onclick = async () => {
+    await api(`/api/callcentre/departments/${b.dataset.toggleDept}`, patch({ enabled: b.dataset.enabled !== "true" }));
+    toast("Department updated"); loadDepartments();
+  });
+  $("deptRows").querySelectorAll("[data-del-dept]").forEach((b) => b.onclick = async () => {
+    if (!confirm("Delete this department and its staff?")) return;
+    await api(`/api/callcentre/departments/${b.dataset.delDept}`, { method: "DELETE" });
+    toast("Department deleted"); loadDepartments();
+  });
+}
+
+$("d_add").onclick = async () => {
+  try {
+    await api("/api/callcentre/departments", json({
+      dtmf_digit: $("d_digit").value.trim(), name: $("d_name").value.trim(),
+      ring_timeout_seconds: Number($("d_timeout").value), no_answer_action: $("d_action").value,
+      fallback_number: $("d_fallback").value.trim() || null,
+    }));
+    $("d_digit").value = $("d_name").value = $("d_fallback").value = "";
+    toast("Department created"); loadDepartments();
+  } catch (error) { toast(error.message, true); }
+};
+
+// ---- agents ----
+async function loadAgents() {
+  const [departments, agents] = await Promise.all([api("/api/callcentre/departments"), api("/api/callcentre/agents")]);
+  const names = Object.fromEntries(departments.map((d) => [d.id, `${d.dtmf_digit} · ${d.name}`]));
+  $("a_dept").innerHTML = departments.map((d) => `<option value="${d.id}">${esc(names[d.id])}</option>`).join("");
+  $("agentRows").innerHTML = agents.map((a) => `<tr>
+    <td>${esc(a.name)}</td><td>${esc(names[a.department_id] || "—")}</td>
+    <td>${esc(a.phone_number)}</td><td>${esc(a.backup_number || "—")}</td>
+    <td>${esc(a.priority)}</td><td>${a.ring_timeout_seconds ? esc(a.ring_timeout_seconds) + "s" : '<span class="muted">dept</span>'}</td>
+    <td>${a.active ? '<span class="pill ok">On duty</span>' : '<span class="pill unknown">Off duty</span>'}</td>
+    <td><button class="action secondary" data-toggle-agent="${a.id}" data-active="${a.active}">${a.active ? "Set off duty" : "Set on duty"}</button>
+        <button class="action danger" data-del-agent="${a.id}">Delete</button></td></tr>`).join("") ||
+    `<tr><td colspan="8" class="muted">No staff yet.</td></tr>`;
+
+  $("agentRows").querySelectorAll("[data-toggle-agent]").forEach((b) => b.onclick = async () => {
+    await api(`/api/callcentre/agents/${b.dataset.toggleAgent}`, patch({ active: b.dataset.active !== "true" }));
+    toast("Staff updated"); loadAgents();
+  });
+  $("agentRows").querySelectorAll("[data-del-agent]").forEach((b) => b.onclick = async () => {
+    if (!confirm("Remove this staff member?")) return;
+    await api(`/api/callcentre/agents/${b.dataset.delAgent}`, { method: "DELETE" });
+    toast("Staff removed"); loadAgents();
+  });
+}
+
+$("a_add").onclick = async () => {
+  try {
+    const timeout = $("a_timeout").value.trim();
+    await api(`/api/callcentre/departments/${$("a_dept").value}/agents`, json({
+      name: $("a_name").value.trim(), phone_number: $("a_number").value.trim(),
+      backup_number: $("a_backup").value.trim() || null, priority: Number($("a_priority").value),
+      ring_timeout_seconds: timeout ? Number(timeout) : null,
+    }));
+    $("a_name").value = $("a_number").value = $("a_backup").value = $("a_timeout").value = "";
+    toast("Staff added"); loadAgents();
+  } catch (error) { toast(error.message, true); }
+};
+
+// ---- routing ----
+async function loadRouting() {
+  const { digits } = await api("/api/admin/routing-overview");
+  $("routingRows").innerHTML = Object.entries(digits).map(([digit, info]) => `<tr>
+    <td><strong>${esc(digit)}</strong></td>
+    <td>${esc(info.name)}${info.kind === "reserved" ? ' <span class="muted">(reserved)</span>' : ""}</td>
+    <td>${info.destinations.length ? info.destinations.map((t, i) => `${i + 1}. ${esc(t.label)} — ${esc(t.number)}`).join("<br>") : '<span class="muted">—</span>'}</td>
+    <td>${esc(info.no_answer_action || "—")}</td>
+    <td>${info.enabled ? '<span class="pill ok">Active</span>' : '<span class="pill unknown">Inactive</span>'}</td></tr>`).join("");
+}
+
+// ---- calls ----
+async function loadCalls() {
+  const calls = await api("/api/callcentre/calls?limit=50");
+  $("callRows").innerHTML = calls.map((c) => `<tr>
+    <td>${fmtTime(c.started_at)}</td><td>${esc(c.caller_number || "—")}</td><td>${esc(c.called_number || "—")}</td>
+    <td>${esc(c.status)}${c.hangup_cause ? ` <span class="muted">(${esc(c.hangup_cause)})</span>` : ""}</td>
+    <td>${c.ai_handled ? "AI" : ""}${c.routed_to_staff_number ? " " + esc(c.routed_to_staff_number) : ""}</td>
+    <td>${c.duration_seconds != null ? esc(c.duration_seconds) + "s" : "—"}</td>
+    <td><button class="action secondary" data-call="${c.id}">Timeline</button></td></tr>`).join("") ||
+    `<tr><td colspan="7" class="muted">No calls recorded yet.</td></tr>`;
+
+  $("callRows").querySelectorAll("[data-call]").forEach((b) => b.onclick = async () => {
+    const events = await api(`/api/callcentre/calls/${b.dataset.call}/events`);
+    $("callDetail").hidden = false;
+    $("eventRows").innerHTML = events.map((e) => `<tr><td>${fmtTime(e.at)}</td><td>${esc(e.type)}</td>
+      <td class="muted">${esc(JSON.stringify(e.detail ?? {}))}</td></tr>`).join("") ||
+      `<tr><td colspan="3" class="muted">No events for this call.</td></tr>`;
+  });
+}
+
+// ---- knowledge base ----
+async function loadKnowledge() {
+  const documents = await api("/api/knowledge");
+  $("kbRows").innerHTML = documents.map((d) => `<tr>
+    <td>${esc(d.filename)}</td>
+    <td>${d.status === "ready" ? '<span class="pill ok">Ready</span>' : d.status === "failed" ? '<span class="pill bad">Failed</span>' : `<span class="pill unknown">${esc(d.status)}</span>`}
+        ${d.error ? `<div class="muted">${esc(d.error)}</div>` : ""}</td>
+    <td>${esc(d.page_count ?? "—")}</td><td>${esc(d.chunk_count ?? "—")}</td>
+    <td><button class="action danger" data-del-doc="${d.id}">Delete</button></td></tr>`).join("") ||
+    `<tr><td colspan="5" class="muted">No documents uploaded.</td></tr>`;
+
+  $("kbRows").querySelectorAll("[data-del-doc]").forEach((b) => b.onclick = async () => {
+    if (!confirm("Delete this document and its embeddings?")) return;
+    await api(`/api/knowledge/${b.dataset.delDoc}`, { method: "DELETE" });
+    toast("Document deleted"); loadKnowledge();
+  });
+}
+
+$("kb_upload").onclick = async () => {
+  const file = $("kb_file").files[0];
+  if (!file) return toast("Choose a PDF first", true);
+  const form = new FormData();
+  form.append("file", file);
+  try {
+    await api("/api/knowledge/upload", { method: "POST", body: form });
+    toast("Uploaded and indexed"); $("kb_file").value = ""; loadKnowledge();
+  } catch (error) { toast(error.message, true); }
+};
+
+// ---- AI settings ----
+let aiFieldSpecs = [];
+async function loadAi() {
+  const data = await api("/api/admin/settings");
+  aiFieldSpecs = data.fields;
+  $("providers").innerHTML = Object.entries(data.providers)
+    .map(([k, v]) => `<strong>${esc(k)}</strong>: ${esc(v || "—")}`).join(" &nbsp;·&nbsp; ");
+  $("aiFields").innerHTML = data.fields.map((f) => {
+    const value = data.values[f.key];
+    const control = f.choices
+      ? `<select id="set_${f.key}">${f.choices.map((c) => `<option ${c === value ? "selected" : ""}>${esc(c)}</option>`).join("")}</select>`
+      : f.key.includes("prompt") || f.key.includes("message")
+        ? `<textarea id="set_${f.key}">${esc(value)}</textarea>`
+        : `<input id="set_${f.key}" type="${f.type === "str" ? "text" : "number"}" step="any" value="${esc(value)}"
+             ${f.minimum != null ? `min="${f.minimum}"` : ""} ${f.maximum != null ? `max="${f.maximum}"` : ""}>`;
+    const range = f.minimum != null ? ` <span class="muted">(${f.minimum}–${f.maximum})</span>` : "";
+    return `<div class="field" style="margin-bottom:12px"><label>${esc(f.label)}${range}</label>${control}</div>`;
+  }).join("");
+}
+
+$("ai_save").onclick = async () => {
+  const values = {};
+  aiFieldSpecs.forEach((f) => { values[f.key] = $(`set_${f.key}`).value; });
+  try {
+    await api("/api/admin/settings", { method: "PUT", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ values }) });
+    toast("Settings saved — they apply to the next call");
+  } catch (error) { toast(error.message, true); }
+};
+
+// ---- system + audit ----
+async function loadSystem() {
+  const health = await api("/api/admin/health");
+  $("systemChecks").innerHTML = renderChecks(health.checks);
+  const resources = health.checks.resources?.data || {};
+  $("systemResources").innerHTML = `<table><tbody>
+    <tr><td style="width:170px">Load average</td><td>${resources.load_average ? `${resources.load_average["1m"]} / ${resources.load_average["5m"]} / ${resources.load_average["15m"]}` : '<span class="muted">unavailable</span>'}</td></tr>
+    <tr><td>Memory</td><td>${resources.memory ? `${resources.memory.used_mb} of ${resources.memory.total_mb} MB (${resources.memory.used_percent}%)` : '<span class="muted">unavailable</span>'}</td></tr>
+    <tr><td>Disk</td><td>${resources.disk ? `${resources.disk.used_gb} of ${resources.disk.total_gb} GB (${resources.disk.used_percent}%)` : '<span class="muted">unavailable</span>'}</td></tr>
+  </tbody></table>`;
+}
+
+async function loadAudit() {
+  const rows = await api("/api/admin/audit?limit=100");
+  $("auditRows").innerHTML = rows.map((r) => `<tr><td>${fmtTime(r.at)}</td><td>${esc(r.actor)}</td>
+    <td>${esc(r.action)}</td><td>${esc(r.entity)}</td><td class="muted">${esc(JSON.stringify(r.detail ?? {}))}</td></tr>`).join("") ||
+    `<tr><td colspan="5" class="muted">No configuration changes recorded.</td></tr>`;
+}
+
+const loaders = { dashboard: loadDashboard, departments: loadDepartments, agents: loadAgents, routing: loadRouting,
+                  calls: loadCalls, knowledge: loadKnowledge, ai: loadAi, system: loadSystem, audit: loadAudit };
+async function load(tab) { try { await loaders[tab](); } catch (error) { toast(error.message, true); } }
+
+// ---- session ----
+$("loginBtn").onclick = async () => {
+  try {
+    await api("/api/admin/login", json({ password: $("password").value }));
+    $("password").value = ""; showApp();
+  } catch (error) { toast(error.message, true); }
+};
+$("password").addEventListener("keydown", (e) => { if (e.key === "Enter") $("loginBtn").click(); });
+$("logout").onclick = async () => { await api("/api/admin/logout", { method: "POST" }); showLogin(); };
+
+(async function start() {
+  try {
+    const session = await fetch("/api/admin/session", { credentials: "same-origin" }).then((r) => r.json());
+    $("loginHint").textContent = session.password_login_enabled
+      ? "" : "Password login is disabled — set ADMIN_PASSWORD in backend/.env to enable it.";
+    session.authenticated ? showApp() : showLogin();
+  } catch { showLogin(); }
+})();
+</script>
+</body>
+</html>

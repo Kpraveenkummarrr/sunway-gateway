@@ -9,7 +9,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.core.config import Settings, get_settings
 from app.core.db import get_db
 from app.core.logging import get_logger
-from app.core.security import require_internal_api_key
+from app.core.admin_auth import require_admin
 from app.models.knowledge import KnowledgeDocument
 from app.providers.embeddings.base import EmbeddingProviderError
 from app.providers.embeddings.factory import get_embedding_provider
@@ -17,7 +17,7 @@ from app.services.knowledge_ingestion import IngestionError, ingest_pdf
 from app.services.knowledge_search import SearchError, search_chunks
 from app.services.pdf_extraction import PyPDFTextExtractor
 
-router = APIRouter(prefix="/api/knowledge", tags=["knowledge"], dependencies=[Depends(require_internal_api_key)])
+router = APIRouter(prefix="/api/knowledge", tags=["knowledge"], dependencies=[Depends(require_admin)])
 logger = get_logger(__name__)
 
 _extractor = PyPDFTextExtractor()

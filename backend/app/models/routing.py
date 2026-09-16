@@ -56,6 +56,8 @@ class Agent(TimestampMixin, Base):
     backup_number: Mapped[str | None] = mapped_column(String(32), nullable=True)
 
     priority: Mapped[int] = mapped_column(Integer, default=100)
+    # Overrides the department's ring timeout for this agent when set.
+    ring_timeout_seconds: Mapped[int | None] = mapped_column(Integer, nullable=True)
     active: Mapped[bool] = mapped_column(Boolean, default=True)
 
     department: Mapped["Department"] = relationship(back_populates="agents")
