@@ -7,6 +7,7 @@ known-incompatible document vectors out of a query.
 """
 
 import re
+import time
 import unicodedata
 from dataclasses import dataclass
 from uuid import UUID
@@ -118,6 +119,7 @@ async def search_chunks(
     top_k: int,
     similarity_threshold: float | None = None,
     embedding_space: str | None = None,
+    timings: dict[str, int] | None = None,
 ) -> list[SearchResult]:
     """Return top-K hybrid-ranked chunks from ready documents.
 
@@ -135,7 +137,10 @@ async def search_chunks(
     if embedding_space is not None and not embedding_space.strip():
         raise SearchError("embedding_space must not be blank")
 
+    normalization_started = time.monotonic()
     terms = lexical_terms(query_text or "")
+    if timings is not None:
+        timings["query_normalization"] = int((time.monotonic() - normalization_started) * 1000)
     distance = KnowledgeChunk.embedding.cosine_distance(query_embedding)
     similarity = (1 - distance).label("similarity")
 
@@ -160,6 +165,7 @@ async def search_chunks(
     # The vector shortlist stays bounded. For small business knowledge bases,
     # the additional lexical pass is also bounded but wide enough to recover
     # an exact domain-term hit that a weak cross-lingual vector misses.
+    retrieval_started = time.monotonic()
     vector_rows = (
         await db.execute(_base_stmt().order_by(distance).limit(max(top_k * 4, top_k)))
     ).all()
@@ -182,6 +188,8 @@ async def search_chunks(
         for chunk, filename, sim in lexical_rows:
             if sim is not None:
                 candidates[chunk.id] = (chunk, filename, float(sim))
+    if timings is not None:
+        timings["rag"] = int((time.monotonic() - retrieval_started) * 1000)
 
     ranked: list[tuple[float, SearchResult]] = []
     for chunk, filename, sim in candidates.values():

@@ -12,8 +12,14 @@ from app.providers.embeddings.mock import MockEmbeddingProvider
 from app.providers.llm.mock import MockLLMProvider
 from app.providers.stt.mock import MockSTTProvider
 from app.providers.tts.mock import MockTTSProvider
-from app.services.call_controller import AICallController
-from tests.fake_ari import FakeAriClient, hangup_event, recording_finished_event, stasis_start_event
+from app.services.call_controller import AICallController, CallState
+from tests.fake_ari import (
+    FakeAriClient,
+    hangup_event,
+    recording_finished_event,
+    stasis_start_event,
+    talking_started_event,
+)
 
 
 def _make_controller(tmp_path: Path, **overrides) -> AICallController:
@@ -442,6 +448,77 @@ async def test_recording_uses_end_of_speech_and_max_turn_settings() -> None:
         controller, ari = _make_controller(Path(tmp), ai_end_of_speech_silence_seconds=2, ai_max_turn_seconds=20)
         await controller._start_next_recording(CallState("PJSIP/700-REC", _uuid.uuid4(), _uuid.uuid4()))
         assert ari.record_params[-1] == {"max_silence_seconds": 2, "max_duration_seconds": 20}
+
+
+@pytest.mark.asyncio
+async def test_caller_speech_stops_active_playback_for_barge_in() -> None:
+    """A TALK_DETECT event cancels the active ARI playback and wakes the
+    controller so it can start recording the caller's interruption."""
+    import asyncio as _asyncio
+    import uuid as _uuid
+
+    with tempfile.TemporaryDirectory() as tmp:
+        controller, ari = _make_controller(Path(tmp))
+        ari.on_play_started = None  # keep the playback active for the test
+        channel_id = "PJSIP/700-BARGE"
+        state = CallState(channel_id, _uuid.uuid4(), _uuid.uuid4())
+
+        playback_task = _asyncio.create_task(controller._play_and_wait(state, media="sound:test-reply"))
+        await _poll_until(lambda: bool(ari.played))
+        playback_id = f"playback-{len(ari.played)}"
+        assert state.active_playback_id == playback_id
+
+        controller._calls[channel_id] = state
+        await controller.dispatch_event(talking_started_event(channel_id))
+        await _asyncio.wait_for(playback_task, timeout=1.0)
+
+        assert ari.stopped_playbacks == [playback_id]
+        assert state.barge_in_generation == 1
+        assert state.active_playback_id is None
+
+
+@pytest.mark.asyncio
+async def test_barge_in_discards_prefetched_reply_chunks() -> None:
+    import asyncio as _asyncio
+    import uuid as _uuid
+
+    with tempfile.TemporaryDirectory() as tmp:
+        controller, ari = _make_controller(Path(tmp))
+        ari.on_play_started = None
+        channel_id = "PJSIP/700-BARGE-CHUNKS"
+        state = CallState(channel_id, _uuid.uuid4(), _uuid.uuid4())
+        controller._calls[channel_id] = state
+        reply = (
+            "The first sentence is long enough to be a complete spoken chunk. "
+            "The second sentence should be discarded after the caller interrupts."
+        )
+
+        speech_task = _asyncio.create_task(controller._speak_reply(state, reply))
+        await _poll_until(lambda: bool(ari.played))
+        await controller.dispatch_event(talking_started_event(channel_id))
+        result = await _asyncio.wait_for(speech_task, timeout=1.0)
+
+        assert result["chunks"] == 2
+        assert result["tts_ms"] >= 0
+        assert result["audio_ms"] >= 0
+        assert len(ari.played) == 1
+        assert len(ari.stopped_playbacks) == 1
+        controller._calls.pop(channel_id, None)
+
+
+@pytest.mark.asyncio
+async def test_talking_event_without_playback_does_not_interrupt_idle_call() -> None:
+    import uuid as _uuid
+
+    with tempfile.TemporaryDirectory() as tmp:
+        controller, ari = _make_controller(Path(tmp))
+        channel_id = "PJSIP/700-NO-PLAYBACK"
+        state = CallState(channel_id, _uuid.uuid4(), _uuid.uuid4())
+        controller._calls[channel_id] = state
+        await controller.dispatch_event(talking_started_event(channel_id))
+        assert state.barge_in_generation == 0
+        assert ari.stopped_playbacks == []
+        controller._calls.pop(channel_id, None)
 
 
 @pytest.mark.asyncio

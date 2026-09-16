@@ -152,10 +152,12 @@ async def handle_text_turn(
     async def _pipeline() -> tuple[list[SearchResult], object, int]:
         embed_started = time.monotonic()
         query_embedding = await embedding_provider.embed_one(user_text)
-        timings["embed"] = int((time.monotonic() - embed_started) * 1000)
-        logger.info("embed stage: %dms", timings["embed"])
+        timings["embedding"] = int((time.monotonic() - embed_started) * 1000)
+        # Keep the old key for callers that consumed the pre-existing timing
+        # dictionary while exposing the clearer public name.
+        timings["embed"] = timings["embedding"]
+        logger.info("embedding stage: %dms", timings["embedding"])
 
-        rag_started = time.monotonic()
         try:
             retrieved = await asyncio.wait_for(
                 search_chunks(
@@ -165,15 +167,17 @@ async def handle_text_turn(
                     top_k=settings.rag_top_k,
                     similarity_threshold=settings.rag_similarity_threshold,
                     embedding_space=embedding_provider.embedding_space,
+                    timings=timings,
                 ),
                 timeout=settings.provider_timeout_seconds,
             )
         except asyncio.TimeoutError as exc:
             raise SearchError(f"RAG search timed out after {settings.provider_timeout_seconds}s") from exc
-        timings["rag"] = int((time.monotonic() - rag_started) * 1000)
         logger.info("rag stage: %dms, %d chunks", timings["rag"], len(retrieved))
 
+        context_started = time.monotonic()
         context = build_context(retrieved, max_chars=settings.ai_max_context_chars)
+        timings["context"] = int((time.monotonic() - context_started) * 1000)
         history = await get_history(db, session.id)
         llm_history = _history_to_llm_messages(history, max_messages=settings.ai_max_history_messages)
 
@@ -185,6 +189,7 @@ async def handle_text_turn(
         )
         llm_latency_ms = int((time.monotonic() - llm_started) * 1000)
         timings["llm"] = llm_latency_ms
+        timings["llm_ms"] = llm_latency_ms
         logger.info("llm stage: %dms", llm_latency_ms)
 
         return retrieved, llm_response, llm_latency_ms

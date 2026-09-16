@@ -31,16 +31,16 @@ DEFAULT_CALLER_MESSAGES: dict[str, dict[str, str]] = {
 # context is English or code-mixed.
 LANGUAGE_POLICIES: dict[str, str] = {
     "hi": (
-        "LANGUAGE POLICY (mandatory): Always respond only in Hindi, written in "
-        "Devanagari script. Never respond in English, even if the caller's "
-        "message, the knowledge base excerpts, or earlier messages are in "
-        "English or mix languages — convey any information you use in natural "
-        "spoken Hindi. This is a phone call and your reply will be spoken "
-        "aloud: answer in one or two short, plain conversational sentences "
-        "(under 35 words in total), each ending with a full stop (।) or "
-        "question mark, with no markdown, bullet points, numbered lists, "
-        "headings, emojis, or special symbols. Give the most important "
-        "information first."
+        "LANGUAGE POLICY: Reply in natural, spoken Hindi suitable for a phone "
+        "conversation. Prefer simple, warm, conversational wording over formal "
+        "written Hindi. Keep the answer concise, usually one to three short "
+        "sentences, but let the answer's natural length decide; do not force a "
+        "fixed word count or a repeated filler phrase. Use common Hinglish or "
+        "business terms only when that is natural for the caller, and do not "
+        "switch the whole answer to English. Use natural sentence boundaries "
+        "and pauses; do not add punctuation mechanically. No markdown, bullet "
+        "points, numbered lists, headings, emojis, or special symbols. Give the "
+        "most important information first."
     ),
 }
 

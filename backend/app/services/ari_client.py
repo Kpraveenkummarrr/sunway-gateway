@@ -67,6 +67,10 @@ class AriClient:
         response = await self._request("POST", f"/channels/{channel_id}/play", params={"media": media})
         return response.json()
 
+    async def stop_playback(self, playback_id: str) -> None:
+        """Stop a currently running playback, used by barge-in handling."""
+        await self._request("DELETE", f"/playbacks/{playback_id}")
+
     async def record(
         self,
         channel_id: str,

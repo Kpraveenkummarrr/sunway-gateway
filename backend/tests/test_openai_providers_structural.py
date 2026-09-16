@@ -113,6 +113,8 @@ async def test_openai_llm_valid_request_returns_text() -> None:
     call = provider._client.chat.completions.calls[0]
     assert call["messages"][0]["role"] == "system"
     assert "9-5 Mon-Fri" in call["messages"][0]["content"]
+    assert "KNOWLEDGE CONTEXT" in call["messages"][0]["content"]
+    assert "ANSWER RULES" in call["messages"][0]["content"]
     assert call["messages"][1] == {"role": "user", "content": "What are your hours?"}
 
 

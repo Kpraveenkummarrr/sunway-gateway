@@ -13,6 +13,7 @@ class FakeAriClient:
         self.recorded: list[tuple[str, str]] = []
         self.record_params: list[dict] = []
         self.hungup: list[str] = []
+        self.stopped_playbacks: list[str] = []
         self.fail_answer_for: set[str] = set()
         self.fail_record_for: set[str] = set()
         # Channels that no longer exist in Asterisk (hung up / destroyed).
@@ -57,6 +58,9 @@ class FakeAriClient:
         if self.on_play_started is not None:
             asyncio.create_task(self._signal_playback_finished(playback_id))
         return {"id": playback_id}
+
+    async def stop_playback(self, playback_id: str) -> None:
+        self.stopped_playbacks.append(playback_id)
 
     async def _signal_playback_finished(self, playback_id: str) -> None:
         await asyncio.sleep(0)  # let the caller register its wait first
@@ -125,6 +129,10 @@ def recording_finished_event(name: str, *, audio_format: str = "wav") -> dict:
 
 def hangup_event(channel_id: str) -> dict:
     return {"type": "StasisEnd", "channel": {"id": channel_id}}
+
+
+def talking_started_event(channel_id: str) -> dict:
+    return {"type": "ChannelTalkingStarted", "channel": {"id": channel_id}}
 
 
 def channel_destroyed_event(channel_id: str) -> dict:
