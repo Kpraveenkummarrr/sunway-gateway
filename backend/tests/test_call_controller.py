@@ -522,6 +522,37 @@ async def test_talking_event_without_playback_does_not_interrupt_idle_call() -> 
 
 
 @pytest.mark.asyncio
+async def test_media_formats_rtp_stats_and_playback_timing_are_measured(caplog) -> None:
+    import logging
+    import uuid as _uuid
+
+    with tempfile.TemporaryDirectory() as tmp:
+        controller, ari = _make_controller(Path(tmp))
+        channel_id = "PJSIP/700-MEDIA-DIAGNOSTICS"
+        state = CallState(channel_id, _uuid.uuid4(), _uuid.uuid4())
+        caplog.set_level(logging.INFO, logger="app.services.call_controller")
+
+        await controller._log_media_formats(channel_id)
+        await controller._play_and_wait(
+            state,
+            media="sound:test-reply",
+            expected_duration_seconds=0.1,
+        )
+        await _poll_until(lambda: bool(ari.rtp_statistics_requests))
+
+        assert ari.requested_channel_variables == [
+            (channel_id, "CHANNEL(audionativeformat)"),
+            (channel_id, "CHANNEL(audioreadformat)"),
+            (channel_id, "CHANNEL(audiowriteformat)"),
+        ]
+        assert ari.rtp_statistics_requests == [channel_id]
+        messages = [record.getMessage() for record in caplog.records]
+        assert any("native=ulaw read=slin write=slin" in message for message in messages)
+        assert any("RTP statistics:" in message and "txploss=0" in message for message in messages)
+        assert any("Playback timing:" in message and "expected_ms=100" in message for message in messages)
+
+
+@pytest.mark.asyncio
 async def test_successful_turn_resets_failure_count() -> None:
     with tempfile.TemporaryDirectory() as tmp:
         tmp_path = Path(tmp)

@@ -66,6 +66,7 @@ from app.providers.stt.base import STTProvider, STTProviderError
 from app.providers.tts.base import TTSProvider, TTSProviderError
 from app.services.ari_client import AriClient, AriError
 from app.services.audio import (
+    ASTERISK_SAMPLE_RATE,
     AudioFormatError,
     is_effectively_silent,
     is_too_short,
@@ -342,6 +343,8 @@ class AICallController:
                 logger.exception("Failed to answer channel %s", channel_id)
                 await self._finish_call(channel_id, status="failed", hangup_cause="answer_failed")
             return
+
+        self._start_background_diagnostic(self._log_media_formats(channel_id))
 
         async with self._session_factory() as db:
             call_row = await db.get(Call, state.call_row_id)
@@ -628,6 +631,75 @@ class AICallController:
 
     # ---- speech ----
 
+    def _start_background_diagnostic(self, awaitable) -> None:
+        """Run read-only diagnostics without extending caller latency."""
+        task = asyncio.create_task(awaitable)
+        self._background_tasks.add(task)
+
+        def completed(done: asyncio.Task) -> None:
+            self._background_tasks.discard(done)
+            if done.cancelled():
+                return
+            try:
+                done.result()
+            except Exception:  # noqa: BLE001 - diagnostics must never affect call control
+                logger.exception("Background voice diagnostic failed")
+
+        task.add_done_callback(completed)
+
+    async def _log_media_formats(self, channel_id: str) -> None:
+        """Log the actual channel formats selected by Asterisk.
+
+        ``audionativeformat`` is the negotiated endpoint codec; read/write
+        formats show any translation Asterisk is applying around playback.
+        Diagnostics are best-effort and must never fail a call.
+        """
+        variables = {
+            "native": "CHANNEL(audionativeformat)",
+            "read": "CHANNEL(audioreadformat)",
+            "write": "CHANNEL(audiowriteformat)",
+        }
+
+        async def read(variable: str) -> str:
+            try:
+                return await self._ari.get_channel_variable(channel_id, variable)
+            except AriError as exc:
+                if not _channel_gone(exc):
+                    logger.warning("Could not read %s for channel %s: %s", variable, channel_id, exc)
+                return "unavailable"
+
+        values = await asyncio.gather(*(read(variable) for variable in variables.values()))
+        formats = dict(zip(variables, values, strict=True))
+        logger.info(
+            "Telephony media formats: channel=%s native=%s read=%s write=%s playback_file=slin/%dHz",
+            channel_id,
+            formats["native"] or "unknown",
+            formats["read"] or "unknown",
+            formats["write"] or "unknown",
+            ASTERISK_SAMPLE_RATE,
+        )
+
+    async def _log_rtp_statistics(self, channel_id: str) -> None:
+        """Log Asterisk RTP/RTCP counters after playback, when available."""
+        try:
+            stats = await self._ari.get_rtp_statistics(channel_id)
+        except AriError as exc:
+            if not _channel_gone(exc):
+                logger.warning("RTP statistics unavailable for channel %s: %s", channel_id, exc)
+            return
+        logger.info(
+            "RTP statistics: channel=%s txcount=%s rxcount=%s txploss=%s rxploss=%s "
+            "txjitter=%s rxjitter=%s rtt=%s",
+            channel_id,
+            stats.get("txcount", "-"),
+            stats.get("rxcount", "-"),
+            stats.get("txploss", "-"),
+            stats.get("rxploss", "-"),
+            stats.get("txjitter", "-"),
+            stats.get("rxjitter", "-"),
+            stats.get("rtt", "-"),
+        )
+
     async def _render_speech(self, text: str) -> SpeechClip:
         """TTS + telephone preparation for one piece of text, independent of
         any call. Raises TTSProviderError."""
@@ -653,7 +725,8 @@ class AICallController:
             raise TTSProviderError(f"Unsupported TTS audio format for Asterisk playback: {result.audio_format!r}")
         prep_started = time.monotonic()
         try:
-            source_rate = read_wav_info(result.audio_bytes).sample_rate
+            source_info = read_wav_info(result.audio_bytes)
+            source_levels = measure_levels(result.audio_bytes)
             audio = await asyncio.to_thread(
                 prepare_tts_for_playback, result.audio_bytes, speed=self._settings.ai_tts_speed
             )
@@ -664,23 +737,55 @@ class AICallController:
         levels = measure_levels(audio)
         words = len(text.split())
         words_per_minute = (words / seconds * 60.0) if seconds > 0 else 0.0
+        source_words_per_minute = (
+            words / source_info.duration_seconds * 60.0 if source_info.duration_seconds > 0 else 0.0
+        )
+        model = (
+            self._settings.bhashini_tts_service_id
+            if self._settings.tts_provider.strip().lower() == "bhashini"
+            else self._settings.tts_model or self._settings.tts_provider
+        )
+        voice = (
+            self._settings.bhashini_tts_gender
+            if self._settings.tts_provider.strip().lower() == "bhashini"
+            else self._settings.tts_voice or "default"
+        )
 
         logger.info(
-            "TTS ok: %d chars/%d words -> %dHz source, %.2fs 8kHz playback at %.2fx, "
-            "rate=%.1f words/min peak=%.1fdBFS rms=%.1fdBFS leading=%.3fs trailing=%.3fs clipped=%.4f "
-            "tts=%dms prep=%dms",
+            "TTS source: provider=%s model=%s voice=%s chars=%d words=%d rate=%dHz channels=%d bits=%d "
+            "duration=%.2fs speech_rate=%.1f words/min peak=%.1fdBFS rms=%.1fdBFS noise_floor=%.1fdBFS "
+            "leading=%.3fs trailing=%.3fs clipped=%.4f tts=%dms",
+            self._settings.tts_provider,
+            model,
+            voice,
             len(text),
             words,
-            source_rate,
+            source_info.sample_rate,
+            source_info.channels,
+            source_info.sample_width * 8,
+            source_info.duration_seconds,
+            source_words_per_minute,
+            source_levels.peak_dbfs,
+            source_levels.rms_dbfs,
+            source_levels.noise_floor_dbfs,
+            source_levels.leading_silence_seconds,
+            source_levels.trailing_silence_seconds,
+            source_levels.clipped_ratio,
+            tts_ms,
+        )
+        logger.info(
+            "TTS prepared: target=%dHz duration=%.2fs tempo=%.2fx speech_rate=%.1f words/min "
+            "peak=%.1fdBFS rms=%.1fdBFS peak_delta=%.1fdB leading=%.3fs trailing=%.3fs clipped=%.4f prep=%dms",
+            ASTERISK_SAMPLE_RATE,
             seconds,
             self._settings.ai_tts_speed,
             words_per_minute,
             levels.peak_dbfs,
             levels.rms_dbfs,
+            levels.peak_dbfs - source_levels.peak_dbfs,
             levels.leading_silence_seconds,
             levels.trailing_silence_seconds,
             levels.clipped_ratio,
-            tts_ms,
             prep_ms,
         )
         return SpeechClip(audio=audio, tts_ms=tts_ms, prep_ms=prep_ms, seconds=seconds)
@@ -793,9 +898,20 @@ class AICallController:
         sound_dir.mkdir(parents=True, exist_ok=True)
         file_stem = f"{state.session_id}-{time.time_ns()}"
         (sound_dir / f"{file_stem}.{audio_format}").write_bytes(audio_bytes)
-        await self._play_and_wait(state, media=f"sound:{(sound_dir / file_stem).as_posix()}")
+        duration = read_wav_info(audio_bytes).duration_seconds if audio_format == "wav" else None
+        await self._play_and_wait(
+            state,
+            media=f"sound:{(sound_dir / file_stem).as_posix()}",
+            expected_duration_seconds=duration,
+        )
 
-    async def _play_and_wait(self, state: CallState, *, media: str) -> None:
+    async def _play_and_wait(
+        self,
+        state: CallState,
+        *,
+        media: str,
+        expected_duration_seconds: float | None = None,
+    ) -> None:
         """Starts ARI playback and waits for it to actually finish before
         returning, so the next recording doesn't start (and potentially
         capture the AI's own voice) while audio is still playing out.
@@ -804,6 +920,8 @@ class AICallController:
         if not state.is_active:
             logger.info("Skipping playback on channel %s: call already ended", state.channel_id)
             return
+        playback_started = time.monotonic()
+        request_started = time.monotonic()
         try:
             playback = await self._ari.play(state.channel_id, media=media)
         except AriError as exc:
@@ -815,27 +933,55 @@ class AICallController:
                 state.channel_id,
                 exc.status_code,
             )
-            await self._finish_call(state.channel_id, status="completed", hangup_cause="caller_hangup", channel_gone=True)
+            await self._finish_call(
+                state.channel_id,
+                status="completed",
+                hangup_cause="caller_hangup",
+                channel_gone=True,
+            )
             return
+        request_ms = _ms_since(request_started)
         playback_id = playback.get("id")
         if not playback_id:
+            logger.warning("Playback response for channel %s had no id (request=%dms)", state.channel_id, request_ms)
             return  # can't track completion — proceed rather than hang
 
         finished = asyncio.Event()
         self._playback_finished[playback_id] = finished
         state.active_playback_id = playback_id
+        barge_in_generation = state.barge_in_generation
+        outcome = "finished"
         try:
             completed, _ = await self._unless_call_ends(
                 state, finished.wait(), timeout=self._settings.provider_timeout_seconds
             )
             if not completed:
+                outcome = "call-ended"
                 logger.info("Call on channel %s ended during playback %s", state.channel_id, playback_id)
         except asyncio.TimeoutError:
+            outcome = "timeout"
             logger.warning("Timed out waiting for playback %s to finish on channel %s", playback_id, state.channel_id)
         finally:
             self._playback_finished.pop(playback_id, None)
             if state.active_playback_id == playback_id:
                 state.active_playback_id = None
+            if state.barge_in_generation != barge_in_generation:
+                outcome = "barge-in"
+            wall_ms = _ms_since(playback_started)
+            expected_ms = int(expected_duration_seconds * 1000) if expected_duration_seconds is not None else None
+            drift_ms = wall_ms - expected_ms if expected_ms is not None and outcome == "finished" else None
+            logger.info(
+                "Playback timing: channel=%s playback=%s outcome=%s request_ms=%d wall_ms=%d expected_ms=%s drift_ms=%s",
+                state.channel_id,
+                playback_id,
+                outcome,
+                request_ms,
+                wall_ms,
+                expected_ms if expected_ms is not None else "-",
+                drift_ms if drift_ms is not None else "-",
+            )
+            if state.is_active:
+                self._start_background_diagnostic(self._log_rtp_statistics(state.channel_id))
 
     async def _on_talking_started(self, event: dict) -> None:
         """Stop AI speech when Asterisk detects caller speech.

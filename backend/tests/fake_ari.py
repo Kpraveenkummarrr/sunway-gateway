@@ -14,6 +14,22 @@ class FakeAriClient:
         self.record_params: list[dict] = []
         self.hungup: list[str] = []
         self.stopped_playbacks: list[str] = []
+        self.requested_channel_variables: list[tuple[str, str]] = []
+        self.channel_variables: dict[str, str] = {
+            "CHANNEL(audionativeformat)": "ulaw",
+            "CHANNEL(audioreadformat)": "slin",
+            "CHANNEL(audiowriteformat)": "slin",
+        }
+        self.rtp_statistics_requests: list[str] = []
+        self.rtp_statistics: dict = {
+            "txcount": 100,
+            "rxcount": 100,
+            "txploss": 0,
+            "rxploss": 0,
+            "txjitter": 0.0,
+            "rxjitter": 0.0,
+            "rtt": 0.0,
+        }
         self.fail_answer_for: set[str] = set()
         self.fail_record_for: set[str] = set()
         # Channels that no longer exist in Asterisk (hung up / destroyed).
@@ -110,6 +126,14 @@ class FakeAriClient:
 
     async def get_channel(self, channel_id: str) -> dict:
         return {"id": channel_id}
+
+    async def get_channel_variable(self, channel_id: str, variable: str) -> str:
+        self.requested_channel_variables.append((channel_id, variable))
+        return self.channel_variables.get(variable, "")
+
+    async def get_rtp_statistics(self, channel_id: str) -> dict:
+        self.rtp_statistics_requests.append(channel_id)
+        return dict(self.rtp_statistics)
 
 
 def stasis_start_event(channel_id: str, *, caller_number: str | None = "15551234567", exten: str = "700") -> dict:

@@ -98,6 +98,22 @@ class AriClient:
         response = await self._request("GET", f"/channels/{channel_id}")
         return response.json()
 
+    async def get_channel_variable(self, channel_id: str, variable: str) -> str:
+        """Read a channel variable or dialplan function through ARI."""
+        response = await self._request(
+            "GET",
+            f"/channels/{channel_id}/variable",
+            params={"variable": variable},
+        )
+        value = response.json().get("value")
+        return value if isinstance(value, str) else ""
+
+    async def get_rtp_statistics(self, channel_id: str) -> dict:
+        """Return Asterisk's RTP/RTCP counters for an active channel."""
+        response = await self._request("GET", f"/channels/{channel_id}/rtp_statistics")
+        body = response.json()
+        return body if isinstance(body, dict) else {}
+
     async def events(self) -> AsyncIterator[dict]:
         """Yields parsed ARI events from the WebSocket stream for this
         client's Stasis app. Runs until the connection closes."""

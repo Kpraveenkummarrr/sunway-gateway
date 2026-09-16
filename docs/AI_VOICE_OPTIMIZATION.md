@@ -51,6 +51,11 @@ payload. No undocumented SSML, pitch, prosody, or speech-rate fields were
 added. Playback tempo remains the local pitch-preserving audio preparation
 setting and must be evaluated with real Bhashini output.
 
+The focused real-call diagnostic and A/B procedure is documented in
+[`TELEPHONY_VOICE_QUALITY.md`](TELEPHONY_VOICE_QUALITY.md). It preserves the
+current path as the control and does not approve a production voice change
+without a Hindi-speaking tester's result.
+
 ## Verification
 
 Local focused verification passed:

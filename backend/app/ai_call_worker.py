@@ -75,6 +75,14 @@ async def main() -> None:
         settings.ai_end_of_speech_silence_seconds,
         settings.ai_tts_speed,
     )
+    if settings.tts_provider.strip().lower() == "bhashini":
+        logger.info(
+            "Bhashini TTS base configuration: service_id=%s gender=%s language=%s local_tempo=%.2fx target_rate=8000Hz",
+            settings.bhashini_tts_service_id,
+            settings.bhashini_tts_gender,
+            settings.ai_language,
+            settings.ai_tts_speed,
+        )
     if settings.ai_language == "hi":
         for kind in ("welcome", "error", "goodbye"):
             message = settings.caller_message(kind)
