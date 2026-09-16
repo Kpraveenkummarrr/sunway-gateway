@@ -6,7 +6,13 @@ import pytest
 from app.models.knowledge import KnowledgeDocument
 from app.providers.embeddings.mock import MockEmbeddingProvider
 from app.services.knowledge_ingestion import ingest_pdf
-from app.services.knowledge_search import SearchError, search_chunks
+from app.services.knowledge_search import (
+    SearchError,
+    has_strong_lexical_match,
+    lexical_match_score,
+    lexical_terms,
+    search_chunks,
+)
 from app.services.pdf_extraction import PyPDFTextExtractor
 from tests.pdf_fixtures import make_pdf, make_simple_pdf
 
@@ -118,3 +124,62 @@ async def test_search_applies_similarity_threshold(db_session) -> None:
 def make_pdf_with_many_paragraphs() -> bytes:
     text = "\n\n".join(f"This is paragraph number {i} with some filler content." for i in range(20))
     return make_pdf([text])
+
+
+def test_lumpy_skin_queries_get_safe_alias_terms() -> None:
+    english = lexical_terms("What is Lumpy Skin Disease?")
+    hinglish = lexical_terms("Lumpy skin disease ke lakshan batao")
+    hindi = lexical_terms("\u0932\u092e\u094d\u092a\u0940 \u0938\u094d\u0915\u093f\u0928 \u0921\u093f\u091c\u0940\u091c \u0915\u094d\u092f\u093e \u0939\u0948?")
+
+    for terms in (english, hinglish, hindi):
+        assert "lumpy skin disease" in terms
+        assert has_strong_lexical_match("Lumpy Skin Disease causes fever and skin nodules.", terms)
+
+
+def test_lexical_score_does_not_treat_a_shared_generic_word_as_a_phrase_hit() -> None:
+    terms = lexical_terms("What are the symptoms of Foot and Mouth Disease?")
+    source = "Lumpy Skin Disease causes fever and skin nodules."
+
+    assert lexical_match_score(source, terms) < 1.0
+    assert not has_strong_lexical_match(source, terms)
+
+
+@pytest.mark.asyncio
+async def test_lumpy_skin_source_is_retrieved_for_english_hindi_and_hinglish_queries(db_session) -> None:
+    provider = MockEmbeddingProvider(dimensions=1536)
+    source = (
+        "Lumpy Skin Disease (LSD) is a viral disease of cattle. "
+        "Common signs include fever, reduced milk production, and firm skin nodules."
+    )
+    with tempfile.TemporaryDirectory() as tmp:
+        document = await ingest_pdf(
+            db_session,
+            file_bytes=make_simple_pdf(source),
+            original_filename="lumpy-skin-disease.pdf",
+            storage_dir=Path(tmp),
+            extractor=PyPDFTextExtractor(),
+            embedding_provider=provider,
+            chunk_size=800,
+            chunk_overlap=100,
+        )
+        try:
+            queries = (
+                "What is Lumpy Skin Disease?",
+                "\u0932\u092e\u094d\u092a\u0940 \u0938\u094d\u0915\u093f\u0928 \u0921\u093f\u091c\u0940\u091c \u0915\u094d\u092f\u093e \u0939\u0948?",
+                "Lumpy skin disease ke symptoms kya hain?",
+                "Lumpy skin disease ke lakshan batao",
+            )
+            for query in queries:
+                results = await search_chunks(
+                    db_session,
+                    query_embedding=await provider.embed_one(query),
+                    query_text=query,
+                    top_k=4,
+                    similarity_threshold=0.75,
+                    embedding_space=provider.embedding_space,
+                )
+                assert results and results[0].document_id == document.id
+                assert "Lumpy Skin Disease" in results[0].chunk_text
+        finally:
+            await db_session.delete(document)
+            await db_session.commit()

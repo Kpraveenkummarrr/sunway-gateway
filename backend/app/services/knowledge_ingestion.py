@@ -66,7 +66,11 @@ async def ingest_pdf(
         storage_path=str(storage_path),
         page_count=extracted.page_count,
         status="processing",
-        metadata_json={"content_hash": content_hash},
+        metadata_json={
+            "content_hash": content_hash,
+            "embedding_space": embedding_provider.embedding_space,
+            "embedding_dimensions": EMBEDDING_DIM,
+        },
     )
     db.add(document)
     await db.flush()

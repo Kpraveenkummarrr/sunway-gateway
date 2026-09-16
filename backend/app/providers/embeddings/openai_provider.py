@@ -34,6 +34,11 @@ class OpenAIEmbeddingProvider(EmbeddingProvider):
     def dimensions(self) -> int:
         return self._dimensions
 
+    @property
+    def embedding_space(self) -> str:
+        # Model names and dimensions are configuration metadata, not secrets.
+        return f"openai:{self._model}:{self._dimensions}"
+
     def _get_client(self):
         if self._client is None:
             try:

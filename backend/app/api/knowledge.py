@@ -142,10 +142,12 @@ async def search(
         results = await search_chunks(
             db,
             query_embedding=query_embedding,
+            query_text=body.query,
             top_k=body.top_k or settings.rag_top_k,
             similarity_threshold=body.similarity_threshold
             if body.similarity_threshold is not None
             else settings.rag_similarity_threshold,
+            embedding_space=embedding_provider.embedding_space,
         )
     except SearchError as exc:
         raise HTTPException(status.HTTP_400_BAD_REQUEST, detail=str(exc)) from exc

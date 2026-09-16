@@ -21,6 +21,10 @@ class MockEmbeddingProvider(EmbeddingProvider):
     def dimensions(self) -> int:
         return self._dimensions
 
+    @property
+    def embedding_space(self) -> str:
+        return f"mock:{self._dimensions}"
+
     async def embed(self, texts: list[str]) -> list[list[float]]:
         return [self._embed_one(text) for text in texts]
 

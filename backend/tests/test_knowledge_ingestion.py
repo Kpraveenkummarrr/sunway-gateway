@@ -37,6 +37,8 @@ async def test_ingest_creates_document_and_chunks(db_session) -> None:
             assert document.filename == "test.pdf"
             assert document.metadata_json["chunk_count"] >= 1
             assert "content_hash" in document.metadata_json
+            assert document.metadata_json["embedding_space"] == "mock:1536"
+            assert document.metadata_json["embedding_dimensions"] == 1536
 
             result = await db_session.execute(
                 select(KnowledgeChunk).where(KnowledgeChunk.document_id == document.id)

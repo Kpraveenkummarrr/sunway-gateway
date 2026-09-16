@@ -16,6 +16,16 @@ class EmbeddingProvider(ABC):
         knowledge_chunks.embedding column dimension (see
         app.models.knowledge.EMBEDDING_DIM) or ingestion will reject it."""
 
+    @property
+    def embedding_space(self) -> str:
+        """Stable, non-secret identity for the vector space being used.
+
+        Documents and queries must share an embedding space. Providers can
+        override this when model identity matters; the class/dimension
+        fallback keeps third-party test providers backwards-compatible.
+        """
+        return f"{type(self).__module__}.{type(self).__qualname__}:{self.dimensions}"
+
     @abstractmethod
     async def embed(self, texts: list[str]) -> list[list[float]]:
         """Embed a batch of texts, returning one vector per input text in

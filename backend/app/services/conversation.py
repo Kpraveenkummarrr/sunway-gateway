@@ -161,8 +161,10 @@ async def handle_text_turn(
                 search_chunks(
                     db,
                     query_embedding=query_embedding,
+                    query_text=user_text,
                     top_k=settings.rag_top_k,
                     similarity_threshold=settings.rag_similarity_threshold,
+                    embedding_space=embedding_provider.embedding_space,
                 ),
                 timeout=settings.provider_timeout_seconds,
             )
