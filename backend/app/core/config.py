@@ -99,6 +99,11 @@ class Settings(BaseSettings):
     # Playback tempo for synthesized speech, pitch preserved (1.0 = as the
     # TTS vendor produced it).
     ai_tts_speed: float = 1.15
+    # Play Asterisk's record beep before each caller turn. Off by default:
+    # a beep every turn sounds like an answering machine, and after a
+    # barge-in it lands while the caller is already speaking. A barge-in
+    # restart never beeps regardless of this setting.
+    ai_record_beep: bool = False
     # Caller-facing phrases. Leave empty to use the built-in phrase for
     # AI_LANGUAGE (DEFAULT_CALLER_MESSAGES); set only to override it.
     ai_welcome_message: str = ""

@@ -112,6 +112,7 @@ class FakeAriClient:
         max_duration_seconds: int,
         max_silence_seconds: int,
         audio_format: str = "wav",
+        beep: bool = False,
     ) -> dict:
         self._reject_if_gone("record", channel_id)
         if channel_id in self.fail_record_for:
@@ -120,7 +121,11 @@ class FakeAriClient:
             raise AriError("simulated record failure")
         self.recorded.append((channel_id, name))
         self.record_params.append(
-            {"max_silence_seconds": max_silence_seconds, "max_duration_seconds": max_duration_seconds}
+            {
+                "max_silence_seconds": max_silence_seconds,
+                "max_duration_seconds": max_duration_seconds,
+                "beep": beep,
+            }
         )
         return {"name": name, "format": audio_format}
 

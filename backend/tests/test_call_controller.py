@@ -447,7 +447,11 @@ async def test_recording_uses_end_of_speech_and_max_turn_settings() -> None:
     with tempfile.TemporaryDirectory() as tmp:
         controller, ari = _make_controller(Path(tmp), ai_end_of_speech_silence_seconds=2, ai_max_turn_seconds=20)
         await controller._start_next_recording(CallState("PJSIP/700-REC", _uuid.uuid4(), _uuid.uuid4()))
-        assert ari.record_params[-1] == {"max_silence_seconds": 2, "max_duration_seconds": 20}
+        assert ari.record_params[-1] == {
+            "max_silence_seconds": 2,
+            "max_duration_seconds": 20,
+            "beep": False,
+        }
 
 
 @pytest.mark.asyncio

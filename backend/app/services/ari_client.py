@@ -79,6 +79,7 @@ class AriClient:
         max_duration_seconds: int,
         max_silence_seconds: int,
         audio_format: str = "wav",
+        beep: bool = False,
     ) -> dict:
         response = await self._request(
             "POST",
@@ -89,7 +90,7 @@ class AriClient:
                 "maxDurationSeconds": max_duration_seconds,
                 "maxSilenceSeconds": max_silence_seconds,
                 "ifExists": "overwrite",
-                "beep": "true",
+                "beep": "true" if beep else "false",
             },
         )
         return response.json()

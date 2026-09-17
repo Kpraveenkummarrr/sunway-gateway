@@ -604,3 +604,42 @@ def test_speech_chunks_split_merge_and_truncation() -> None:
     ]
     assert speech_chunks("अधूरा वाक्य", truncated=True) == ["अधूरा वाक्य"]  # nothing better to say
     assert speech_chunks("   ") == []
+
+
+# ---- caller-turn beep ----
+
+
+@pytest.mark.asyncio
+async def test_turns_do_not_beep_by_default(tmp_path, logged_errors) -> None:
+    """A beep before every turn sounds like an answering machine; the
+    natural-conversation default is off."""
+    controller, ari = _make(tmp_path, GatedTTS())
+    channel = _channel()
+    try:
+        await controller.dispatch_event(stasis_start_event(channel))
+        assert ari.record_params[-1]["beep"] is False
+    finally:
+        await controller.dispatch_event(hangup_event(channel))
+        await _cleanup(channel)
+
+
+@pytest.mark.asyncio
+async def test_beep_can_be_enabled_but_never_lands_on_an_interrupted_caller(tmp_path, logged_errors) -> None:
+    """With the beep enabled it plays before a normal turn, but the turn
+    that follows a barge-in must not beep — the caller is already speaking."""
+    controller, ari = _make(tmp_path, GatedTTS(), ai_record_beep=True)
+    channel = _channel()
+    try:
+        await controller.dispatch_event(stasis_start_event(channel))
+        assert ari.record_params[-1]["beep"] is True  # normal turn
+
+        state = controller._calls[channel]
+        state.barge_in_generation += 1  # as _on_talking_started does
+        await controller._start_next_recording(state)
+        assert ari.record_params[-1]["beep"] is False  # interrupted caller
+
+        await controller._start_next_recording(state)
+        assert ari.record_params[-1]["beep"] is True  # back to normal afterwards
+    finally:
+        await controller.dispatch_event(hangup_event(channel))
+        await _cleanup(channel)

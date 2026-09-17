@@ -31,7 +31,7 @@ tested on the client machine, not here.
 | — | Call centre (departments, agents, fallback, history) | Full model, API, routing, dialplan, call history | `app/api/callcentre.py`, `app/models/routing.py` | DONE — managed from the admin panel |
 | — | Admin GUI | Dashboard, departments, staff, routing, call history, knowledge base, AI settings, health, audit — all wired to the real backend | `app/api/admin.py`, `app/static/admin.html`, `app/services/system_config.py`, `app/services/system_health.py` | DONE (KB versioning/re-index and role-based users still missing) |
 | — | AI → human transfer | — | — | NOT BUILT |
-| — | AI barge-in | Asterisk TALK_DETECT → ARI playback cancellation → caller recording | `asterisk/etc/dialplan/ai_agent.conf`, `app/services/call_controller.py` | PARTIAL — local tests pass; GSM echo/noise validation required |
+| — | AI barge-in | Asterisk TALK_DETECT → ARI playback cancellation → caller recording | `asterisk/etc/dialplan/ai_agent.conf`, `app/services/call_controller.py` | VERIFIED on real Asterisk (116 ms detection, playback stopped mid-clip, recording started); GSM echo/noise validation still required |
 | — | Monitoring/health endpoints | `/health`, `/ready`, plus measured Asterisk/worker/SIP/resource checks | `app/api/health.py`, `app/services/system_health.py` | PARTIAL — no metrics history or alerting yet |
 | — | Hindi voice quality/expressiveness | Anti-aliased audio, configurable speed, conversational Hindi prompt, level diagnostics | `app/services/audio.py`, `app/core/config.py`, `app/services/call_controller.py` | PARTIAL — needs live Bhashini/GSM tuning |
 

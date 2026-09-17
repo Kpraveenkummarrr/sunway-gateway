@@ -165,6 +165,7 @@ class CallState:
         "records_closed",
         "active_playback_id",
         "barge_in_generation",
+        "beeped_generation",
     )
 
     def __init__(
@@ -187,6 +188,9 @@ class CallState:
         # Reply playback uses it to discard prefetched chunks after an
         # interruption.
         self.barge_in_generation = 0
+        # Tracks which barge-in generation the last recording start accounted
+        # for, so the turn right after an interruption suppresses the beep.
+        self.beeped_generation = 0
 
     @property
     def is_active(self) -> bool:
@@ -383,6 +387,8 @@ class AICallController:
     async def _start_next_recording(self, state: CallState) -> None:
         if not state.is_active:
             return
+        after_barge_in = state.barge_in_generation > state.beeped_generation
+        state.beeped_generation = state.barge_in_generation
         state.recording_seq += 1
         state.recording_started_monotonic = time.monotonic()
         # ARI's record `name` maps directly to a filename under Asterisk's
@@ -397,6 +403,9 @@ class AICallController:
                 name=name,
                 max_duration_seconds=self._settings.ai_max_turn_seconds,
                 max_silence_seconds=self._settings.ai_end_of_speech_silence_seconds,
+                # After a barge-in the caller is already mid-sentence, so a
+                # beep would land on top of their speech.
+                beep=self._settings.ai_record_beep and not after_barge_in,
             )
         except AriError as exc:
             if _channel_gone(exc):
