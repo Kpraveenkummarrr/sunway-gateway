@@ -132,6 +132,12 @@
       <p class="muted">The document is chunked and embedded on upload; status appears below.</p>
     </div>
     <div class="panel"><h2>Documents</h2><table><thead><tr><th>File</th><th>Status</th><th>Pages</th><th>Chunks</th><th></th></tr></thead><tbody id="kbRows"></tbody></table></div>
+    <div class="panel"><h2>Search index</h2>
+      <div id="kbIndex" class="muted">Loading…</div>
+      <p><button class="action" id="kb_reindex">Re-index everything</button>
+         <span class="muted">Re-embeds every document with the embedding model the AI is configured to use. A document indexed with a different model is invisible to search until this is run.</span></p>
+      <table><thead><tr><th>File</th><th>Chunks</th><th>Indexed with</th><th>Searchable</th><th></th></tr></thead><tbody id="kbIndexRows"></tbody></table>
+    </div>
   </section>
 
   <section id="ai">
@@ -344,7 +350,44 @@ async function loadKnowledge() {
     await api(`/api/knowledge/${b.dataset.delDoc}`, { method: "DELETE" });
     toast("Document deleted"); loadKnowledge();
   });
+
+  await loadIndexStatus();
 }
+
+async function loadIndexStatus() {
+  const status = await api("/api/knowledge/index/status");
+  $("kbIndex").innerHTML = `Embedding model in use: <b>${esc(status.current_embedding_space)}</b> &middot; ` +
+    `searchable ${status.searchable_documents}/${status.documents} ` +
+    (status.healthy ? '<span class="pill ok">index healthy</span>'
+                    : `<span class="pill bad">${status.stale_documents} need re-indexing</span>`);
+  $("kbIndexRows").innerHTML = status.items.map((d) => `<tr>
+    <td>${esc(d.filename)}</td><td>${esc(d.chunk_count)}</td>
+    <td>${esc(d.embedding_space ?? "unknown")}</td>
+    <td>${d.stale ? '<span class="pill bad">No</span>' : '<span class="pill ok">Yes</span>'}
+        <div class="muted">${esc(d.reason)}</div></td>
+    <td><button class="action" data-reindex-doc="${d.document_id}">Re-index</button></td></tr>`).join("") ||
+    `<tr><td colspan="5" class="muted">No documents uploaded.</td></tr>`;
+
+  $("kbIndexRows").querySelectorAll("[data-reindex-doc]").forEach((b) => b.onclick = async () => {
+    b.disabled = true;
+    try {
+      const result = await api("/api/knowledge/index/reindex", json({ document_id: b.dataset.reindexDoc }));
+      toast(`Re-indexed ${result.chunk_count} chunks`); loadKnowledge();
+    } catch (error) { toast(error.message, true); b.disabled = false; }
+  });
+}
+
+$("kb_reindex").onclick = async () => {
+  const button = $("kb_reindex");
+  button.disabled = true;
+  try {
+    const result = await api("/api/knowledge/index/reindex", json({}));
+    toast(result.ok ? `Re-indexed ${result.reindexed.length} documents (${result.chunk_count} chunks)`
+                    : `Re-indexed with failures: ${Object.keys(result.failures).join(", ")}`, !result.ok);
+    loadKnowledge();
+  } catch (error) { toast(error.message, true); }
+  button.disabled = false;
+};
 
 $("kb_upload").onclick = async () => {
   const file = $("kb_file").files[0];

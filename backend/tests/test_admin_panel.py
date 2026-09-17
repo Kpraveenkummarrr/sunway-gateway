@@ -268,6 +268,8 @@ async def test_panel_page_is_served_and_uses_the_real_endpoints(client) -> None:
         "/api/callcentre/agents",
         "/api/callcentre/calls",
         "/api/knowledge",
+        "/api/knowledge/index/status",
+        "/api/knowledge/index/reindex",
         "/api/admin/health",
         "/api/admin/settings",
         "/api/admin/routing-overview",

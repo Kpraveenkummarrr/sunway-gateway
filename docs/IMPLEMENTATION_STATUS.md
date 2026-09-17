@@ -19,7 +19,7 @@ tested on the client machine, not here.
 | 6 | DTMF selection | Digits 1–8 → departments, 9 → AI, 0 → repeat | `ivr.conf`, `departments.conf` | DONE (DTMF mode on the real gateway still to be confirmed) |
 | 7 | Call forwarding to staff mobiles | Department routing: priority order, per-agent backup, fallback | `departments.conf`, `app/services/call_routing.py` | DONE in software — dialling real mobiles is BLOCKED on the trunk + numbers |
 | 8 | AI voice agent | ARI worker: ASR → RAG → LLM → TTS → playback | `app/services/call_controller.py` | PARTIAL — local barge-in and diagnostics added; live voice acceptance outstanding |
-| 9 | PDF knowledge base → RAG | Upload, chunking, embeddings, hybrid pgvector/lexical search, follow-up topic carry-over | `app/services/knowledge_*.py`, `app/api/knowledge.py` | PARTIAL — deterministic LSD retrieval set passes; live DB/source verification and versioning/re-index remain |
+| 9 | PDF knowledge base → RAG | Upload, chunking, embeddings, hybrid search, follow-up topic carry-over, index status + re-index (API and CLI) | `app/services/knowledge_*.py`, `app/api/knowledge.py`, `scripts/reindex_knowledge.py` | PARTIAL — mandatory question set and re-index proven locally; the client's own PDF and versioning remain |
 | 10 | Concurrent calls | Per-channel state, isolated AI sessions | `call_controller.py` | PARTIAL — isolation tested; real multi-channel GSM load not tested |
 | 12 | Server/PBX components | Ubuntu, Asterisk 18.10, Python/FastAPI, PostgreSQL + pgvector | `docs/production-deployment.md` | DONE |
 | 13 | SMG ↔ server SIP/RTP | Working on the client LAN | — | DONE (client machine) |
@@ -34,7 +34,7 @@ tested on the client machine, not here.
 | — | AI → human transfer | — | — | NOT BUILT |
 | — | AI barge-in | Asterisk TALK_DETECT → ARI playback cancellation → caller recording | `asterisk/etc/dialplan/ai_agent.conf`, `app/services/call_controller.py` | VERIFIED on real Asterisk (116 ms detection, playback stopped mid-clip, recording started); GSM echo/noise validation still required |
 | — | Monitoring/health endpoints | `/health`, `/ready`, plus measured Asterisk/worker/SIP/resource checks | `app/api/health.py`, `app/services/system_health.py` | PARTIAL — no metrics history or alerting yet |
-| — | Hindi voice quality/expressiveness | Anti-aliased audio, configurable speed, conversational Hindi prompt, level diagnostics | `app/services/audio.py`, `app/core/config.py`, `app/services/call_controller.py` | PARTIAL — needs live Bhashini/GSM tuning |
+| — | Hindi voice quality/expressiveness | Anti-aliased audio, pitch-preserving tempo (F0 unchanged, measured), markup stripped before TTS, level diagnostics | `app/services/audio.py`, `app/services/spoken_text.py`, `app/services/call_controller.py` | PARTIAL — needs live Bhashini/GSM tuning |
 
 ## T-01 – T-18
 
@@ -60,7 +60,7 @@ tested on the client machine, not here.
 | T-15 | Concurrent calls | PARTIAL | Session isolation tested in code; real 4+ channel GSM test BLOCKED |
 | T-16 | 30-minute stability | NOT RUN | — |
 | T-17 | SIP security / Fail2Ban | NOT RUN | Fail2Ban not configured yet |
-| T-18 | PDF update | PARTIAL | Upload/delete tested and exposed in the admin panel; re-index and activation NOT BUILT |
+| T-18 | PDF update | PARTIAL | Upload/delete tested and exposed in the admin panel; re-index built and proven against real PostgreSQL (`scripts/reindex_knowledge.py`); document versioning/activation still NOT BUILT |
 
 ## Next, in priority order
 
@@ -68,8 +68,8 @@ tested on the client machine, not here.
    retrieval, latency, voice, noise, echo, and barge-in acceptance tests.
 2. **District referral directory** — get the Haryana district → diagnostic
    centre list from the client and set `REFERRAL_DIRECTORY_PATH`.
-3. **Knowledge base management** — versions, activate/deactivate, re-index,
-   and the 20-question accuracy set (T-10).
+3. **Knowledge base management** — document versions and activate/deactivate
+   (re-index is now built; the 20-question accuracy set needs the real PDF).
 4. **AI → human transfer** — a real ARI bridge to a staff member, not just a
    spoken promise.
 5. **Security** — Fail2Ban, outbound number whitelist, call duration cap.

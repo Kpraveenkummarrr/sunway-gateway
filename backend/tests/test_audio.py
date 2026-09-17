@@ -214,3 +214,51 @@ def test_prepare_for_asr_keeps_short_audio_untrimmed() -> None:
 def test_time_stretch_is_identity_at_normal_speed() -> None:
     samples = _tone(440, 1.0, 8000)
     assert time_stretch(samples, 8000, 1.0) is samples
+
+
+# ---- voice-like signal: what the tempo stage does to a real reply ----
+
+
+def _voice_like(seconds: float, rate: int, f0: float = 120.0) -> np.ndarray:
+    """A glottal pulse train with formant emphasis and syllable-rate
+    amplitude modulation — closer to speech than a single tone, which is
+    what the tempo stage actually has to survive."""
+    t = np.arange(int(seconds * rate)) / rate
+    signal = sum(amp * np.sin(k * 2 * np.pi * f0 * t) for k, amp in enumerate([1.0, 0.6, 0.4, 0.28, 0.2], start=1))
+    signal *= 0.5 + 0.5 * np.sin(2 * np.pi * 3.5 * t)  # syllables
+    return 0.6 * signal / np.max(np.abs(signal))
+
+
+def _fundamental_hz(samples: np.ndarray, rate: int) -> float:
+    voiced = samples[np.abs(samples) > 0.02]
+    voiced = voiced - voiced.mean()
+    autocorrelation = np.correlate(voiced, voiced, "full")[len(voiced) - 1 :]
+    low, high = int(rate / 300), int(rate / 70)
+    return rate / (low + int(np.argmax(autocorrelation[low:high])))
+
+
+def test_the_tempo_stage_keeps_the_speaker_pitch_of_voice_like_audio() -> None:
+    """1.15x is a tempo change, not a pitch shift: the client must not get a
+    faster *and* higher voice."""
+    source = _wav_from(_voice_like(3.0, 48000), 48000)
+
+    normal, _ = _samples(prepare_tts_for_playback(source, speed=1.0))
+    faster_bytes = prepare_tts_for_playback(source, speed=1.15)
+    faster, rate = _samples(faster_bytes)
+
+    assert _fundamental_hz(faster, 8000) == pytest.approx(_fundamental_hz(normal, 8000), abs=2.0)
+    assert read_wav_info(faster_bytes).duration_seconds == pytest.approx(3.0 / 1.15, rel=0.05)
+    assert measure_levels(faster_bytes).clipped_ratio == 0.0
+
+
+def test_the_playback_pipeline_leaves_nothing_above_the_telephone_band() -> None:
+    """Energy above 3.4 kHz is what a GSM codec turns into audible grit."""
+    source = _wav_from(_voice_like(2.0, 48000) + _tone(6000, 2.0, 48000, amplitude=0.2), 48000)
+
+    samples, rate = _samples(prepare_tts_for_playback(source, speed=1.15))
+    spectrum = np.abs(np.fft.rfft(samples * np.hanning(len(samples)))) ** 2
+    freqs = np.fft.rfftfreq(len(samples), 1 / rate)
+    in_band = spectrum[(freqs >= 300) & (freqs <= 3400)].sum()
+    out_of_band = spectrum[freqs > 3400].sum()
+
+    assert 10 * np.log10(out_of_band / in_band) < -40

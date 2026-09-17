@@ -76,6 +76,7 @@ from app.services.audio import (
     read_wav_info,
 )
 from app.services.system_config import effective_settings
+from app.services.spoken_text import spoken_text
 from app.services.conversation import (
     ConversationError,
     ConversationTimeoutError,
@@ -95,6 +96,13 @@ _CALLER_MESSAGE_KINDS = ("welcome", "error", "goodbye")
 _SENTENCE_BREAK = re.compile(r"(?<=[।॥?!])\s+|(?<=\.)\s+")
 _SENTENCE_END = ("।", "॥", "?", "!", ".")
 MIN_SPEECH_CHUNK_CHARS = 40
+# The first chunk is allowed to be shorter than the rest. Synthesis time
+# scales with length, and nothing is playing yet, so the opening sentence is
+# the one place where a smaller chunk directly shortens the silence the
+# caller hears. Later chunks keep the larger minimum: they are synthesized
+# while earlier audio is still playing, where small chunks buy nothing and
+# risk choppy prosody.
+FIRST_SPEECH_CHUNK_CHARS = 24
 
 
 def _channel_gone(exc: AriError) -> bool:
@@ -105,11 +113,20 @@ def _ms_since(started: float) -> int:
     return int((time.monotonic() - started) * 1000)
 
 
-def speech_chunks(text: str, *, truncated: bool = False, min_chars: int = MIN_SPEECH_CHUNK_CHARS) -> list[str]:
+def speech_chunks(
+    text: str,
+    *,
+    truncated: bool = False,
+    min_chars: int = MIN_SPEECH_CHUNK_CHARS,
+    first_min_chars: int = FIRST_SPEECH_CHUNK_CHARS,
+) -> list[str]:
     """Splits a reply into sentence-based chunks for incremental TTS.
+    The text is first reduced to what can actually be spoken (see
+    app.services.spoken_text) so no markup reaches the TTS engine.
     Sentences shorter than `min_chars` are merged forward so TTS isn't
     called for fragments. When the LLM hit its token limit (`truncated`), a
     trailing unfinished sentence is dropped rather than spoken cut off."""
+    text = spoken_text(text)
     sentences = [s.strip() for s in _SENTENCE_BREAK.split(text.strip()) if s.strip()]
     if truncated and len(sentences) > 1 and not sentences[-1].endswith(_SENTENCE_END):
         sentences.pop()
@@ -118,11 +135,15 @@ def speech_chunks(text: str, *, truncated: bool = False, min_chars: int = MIN_SP
     current = ""
     for sentence in sentences:
         current = f"{current} {sentence}".strip()
-        if len(current) >= min_chars:
+        if len(current) >= (first_min_chars if not chunks else min_chars):
             chunks.append(current)
             current = ""
     if current:
-        if chunks and len(current) < min_chars:
+        # A leftover tail is merged back only when it is too small to be worth
+        # its own TTS request. Using the larger `min_chars` here would fold a
+        # perfectly speakable closing sentence into the first chunk, which
+        # delays the first audio the caller hears by exactly its length.
+        if chunks and len(current) < first_min_chars:
             chunks[-1] = f"{chunks[-1]} {current}"
         else:
             chunks.append(current)

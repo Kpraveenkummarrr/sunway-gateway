@@ -38,6 +38,20 @@ LSD_PAGES = [
     "Ethnoveterinary preparation for Lumpy Skin Disease described by Sampurna "
     "Nand Yadav and colleagues and published by NDDB uses betel leaves, "
     "black pepper, common salt and jaggery.",
+    "Milk from an animal with Lumpy Skin Disease should be boiled before use, "
+    "and meat must only come from animals passed by a veterinary inspector.",
+]
+
+# The client's mandatory question list. Each pair is a question a farmer asks
+# and a word that must appear in what the AI is given to answer from.
+MANDATORY_QUESTIONS = [
+    ("What is Lumpy Skin Disease?", "viral disease"),
+    ("लम्पी रोग के लक्षण क्या हैं?", "nodules"),
+    ("lumpy skin disease kaise failta hai?", "flies"),
+    ("लम्पी रोग से बचाव कैसे करें?", "Prevention"),
+    ("lampi vaccine kab lagwaye", "vaccinate"),
+    ("क्या दूध पीना सुरक्षित है lumpy me?", "Milk"),
+    ("lampi", "Lumpy Skin Disease"),
 ]
 UNRELATED_PAGE = (
     "Mastitis is an udder infection. Clean the udder before milking and keep "
@@ -117,6 +131,33 @@ async def test_a_farmer_question_reaches_the_lumpy_skin_source(lsd_corpus, db_se
     assert results, f"no chunk retrieved for {query!r}"
     assert {r.document_id for r in results} == {lsd.id}
     assert other.id not in {r.document_id for r in results}
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("query, expected_keyword", MANDATORY_QUESTIONS, ids=[q for q, _ in MANDATORY_QUESTIONS])
+async def test_every_mandatory_question_reaches_the_knowledge_that_answers_it(
+    lsd_corpus, db_session, query, expected_keyword
+) -> None:
+    """Recall, not ranking: the mock embeddings carry no meaning, so what is
+    asserted is that the answering passage reaches the model's context at all.
+    Which of several relevant passages ranks first needs the real embedding
+    provider and is measured on the client machine."""
+    provider, lsd, other = lsd_corpus
+    results = await search_chunks(
+        db_session,
+        query_embedding=await provider.embed_one(query),
+        query_text=query,
+        top_k=10,
+        similarity_threshold=0.75,
+        embedding_space=provider.embedding_space,
+    )
+
+    assert results, f"no knowledge retrieved for {query!r}"
+    assert {r.document_id for r in results} == {lsd.id}
+    context = " ".join(r.chunk_text for r in results)
+    assert expected_keyword.lower() in context.lower(), (
+        f"{query!r} retrieved knowledge that does not contain {expected_keyword!r}"
+    )
 
 
 @pytest.mark.asyncio

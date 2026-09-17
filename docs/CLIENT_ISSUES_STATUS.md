@@ -1,176 +1,53 @@
 # Client issues — current status
 
-Date: 2026-09-17
+Date: 2026-09-17 · Second acceptance pass
 
-One row per issue the client raised, with the cause that was actually found,
-what changed in the code, the evidence behind the status, and what is still
-outstanding.
+**Status meanings.** FIXED = closed with evidence on this machine, nothing
+outstanding. PARTIALLY FIXED = the cause was found and fixed, but part of the
+work remains. CLIENT UAT REQUIRED = the code work is done and only a live run
+on the client's box, gateway or provider keys can confirm it. BLOCKED = it
+cannot proceed without something the client has to supply.
 
-**Evidence rule.** *Verified* means measured on a real system and
-reproducible. *Local only* means proven on the development Asterisk with
-stand-in providers. *Client required* means it cannot be established without
-the client's gateway, SIM cards, Bhashini/Gemini keys or knowledge base — the
-development machine has none of those.
+The development machine has **no SMG4008-8G, no SIM, no Bhashini key and no
+Gemini key**. Nothing here claims a GSM, browser or live-provider result.
 
----
+## Matrix
 
-## 1. The agent takes too long to answer
+| Client Issue | Root Cause | Fix | Automated Evidence | Live Evidence | Remaining Action | Status |
+|---|---|---|---|---|---|---|
+| 1. Time lag | 8 s end-of-speech wait; whole reply synthesized before any audio; welcome re-synthesized per call; a short closing sentence was merged into the first chunk, so the caller waited for the whole reply's synthesis | End-of-speech 8 s → 2 s; sentence chunking with the next chunk synthesized during playback; fixed phrases pre-rendered once; first chunk allowed to be shorter (24 chars) than later ones (40) | `test_latency.py` (6): first audio arrives before whole-reply synthesis; chunk N+1 overlaps chunk N; second call needs no welcome TTS. First-chunk text down 17% on a 5-reply sample (87→50, 66→36 chars on two of them) | Caller-stops-to-reply **10.68 s → 3.41 s** on real Asterisk 18.10 (stand-in TTS) | AI-01, AI-02: time a real GSM call and read the `Turn timing` line | CLIENT UAT REQUIRED |
+| 2. Robotic / non-expressive voice | Flat 1.0× delivery, silence padding, a beep every turn, bookish prompt — **and markdown, list markers and emoji reaching the TTS engine**, which makes an answer sound like a document being read | Tempo 1.15× pitch-preserved, silence trimmed, beep off by default, conversational Hindi policy, helpline persona (one idea, ~25 words), and `spoken_text()` strips headings, bullets, numbering, emphasis, links, tables and emoji before synthesis | `test_spoken_text.py` (19), `test_audio.py` (26). Measured on a speech-like signal: 1.15× keeps F0 at **148.1 Hz vs 148.1 Hz**, centroid within 0.3 Hz, clipping 0.0000 — the tempo stage is not what sounds wrong | A/B bundle produced offline: A 48 kHz source → B1 current 8 kHz, duration 3.00→2.58 s, peak −3.0 dBFS, no clipping | AI-13: listen to `B1` vs `B2` and tell us which to ship; AI-11 on a real call | CLIENT UAT REQUIRED |
+| 3. Database / KB retrieval | Documents embedded with one model were being queried with another, so search excluded them silently; a pronoun-only follow-up retrieved nothing; **and there was no way to re-index**, so the operator could not fix any of it | Hybrid vector+lexical retrieval with embedding-space metadata; domain aliases; follow-up carries the previous question's topic; new `knowledge_reindex` service, `/api/knowledge/index/status`, `/api/knowledge/index/reindex` and `scripts/reindex_knowledge.py` | `test_lsd_knowledge_retrieval.py` (22) — all seven mandatory questions reach the answering passage, in Hindi, Hinglish, transliteration and one word; `test_knowledge_reindex.py` (11) — a stale document is reported, re-indexed and searchable again | Full cycle run against real PostgreSQL: a document indexed with `openai:text-embedding-3-small:1536` reported STALE and exit code 1 → re-index → "searchable by the AI: 1", exit code 0 | KB-01…KB-05: upload the real PDF, re-index, run the mandatory questions | CLIENT UAT REQUIRED |
+| 4. AI not listening when interrupted | Never verified end to end; no evidence Asterisk was delivering talk events | `TALK_DETECT(set)=200,500` before Stasis; talk event stops playback, discards queued chunks, starts recording; the turn after an interruption never beeps | `test_barge_in_matrix.py` (9) — interruption on the first, middle and last chunk; two in a row; stale audio never plays; line noise with nothing playing changes nothing; events for an unknown or ended call are ignored | **Verified on real Asterisk 18.10**: detected **116 ms** after the caller spoke, playback stopped 2.3 s into a 10.4 s clip, recording started 136 ms later, 0 errors | AI-07…AI-10, especially the false-trigger rate on a noisy GSM line | CLIENT UAT REQUIRED |
+| 5. Voice noise / disturbance | `audioop.ratecv` resampled 48 kHz → 8 kHz **with no anti-alias filter**: 6 kHz energy folded into the phone band at full level | Band-limited windowed-sinc resampler, peak normalisation to −3 dBFS, edge fades | `test_audio.py`: alias **0.0 dB → −79.8 dB**; on a speech-like signal, energy above 3.4 kHz is **−70.3 dB** relative to in-band and the noise floor *improves* from −56.9 to −65.0 dBFS | G.711 µ-law/A-law round-trip previews generated and measured: no clipping, ≤0.4 dB RMS change | AI-11, AI-12: `audio_level_report.py` on real recordings to separate GSM-path noise from ours | CLIENT UAT REQUIRED |
+| 6. Call Centre / Admin GUI not UAT tested | Only unit-tested | No structural change this pass; a full live checklist now exists | `test_call_centre.py`, `test_route_agi.py`, `test_admin_panel.py` | A live routing call dialled three destinations in the configured order then fell back to the AI; the panel was served and its health view read real Asterisk state | The whole of `docs/CLIENT_UAT_CHECKLIST.md` §1 and §2 — browser clicks and GSM calls | CLIENT UAT REQUIRED |
+| 7. Helpline behaviour (persona, guardrails, escalation) | The system prompt was a generic business assistant: no helpline role, no guardrails, no escalation, no source attribution | `AI_PERSONA=lsd_helpline`: farmer vocabulary, one idea per turn, never diagnoses, never names a medicine or dose, never discusses price/compensation/schemes, escalates to a government veterinary hospital, attributes preparations to Sampurna Nand Yadav and colleagues (NDDB) | `test_helpline_persona.py` (22) — guardrails present, prompt assembly order, persona switchable from the admin panel | — | AI-14, AI-15, AI-17 on real calls; review the Hindi wording the model actually produces | CLIENT UAT REQUIRED |
+| 8. District diagnostic centres | A language model asked to recall district centres invents them | Centres are loaded from an operator JSON file and injected verbatim; naming anything else is forbidden; no file means the agent names none | `test_helpline_persona.py` — an unlisted district produces a refusal, a broken file degrades to naming nothing | — | **The client must supply the Haryana district → centre list**, then set `REFERRAL_DIRECTORY_PATH` | BLOCKED |
+| 9. Behaviour vs the client reference PDF | The reference document ("Lumpy lsd helpline details.pdf") is **not in the workspace** | Persona built from the requirements as stated in the written brief | — | — | Add the PDF to the repository (or `docs/`), then a line-by-line comparison can be completed and signed off | BLOCKED |
 
-**Cause.** The worker waited 8 seconds of silence before it accepted that the
-caller had finished, then synthesised the entire reply before playing any of
-it, and re-synthesised the welcome message on every call.
+## Reference document
 
-**Changed.** End-of-speech silence 8 s → 2 s; the reply is split into
-sentences and the first one starts playing while the rest is still being
-synthesised; fixed phrases are rendered once and reused; per-stage timings are
-logged for every turn.
-
-**Evidence.** Caller stops speaking → hears the reply: **10.68 s → 3.41 s**,
-measured on real Asterisk 18.10 with a stand-in TTS latency model.
-
-**Outstanding.** Real Bhashini and Gemini round-trip times on the client's
-network. *Client required.*
-
----
-
-## 2. The voice sounds robotic
-
-**Cause.** Flat 1.0× delivery, long silence padding at the start and end of
-each clip, a record beep before every single turn, and a bookish written-Hindi
-prompt.
-
-**Changed.** Configurable tempo (`AI_TTS_SPEED=1.15`, pitch preserved), edge
-silence trimmed, the turn beep is off by default (`AI_RECORD_BEEP=false`) and
-never plays after an interruption, a conversational Hindi language policy, and
-a helpline persona that keeps turns to one idea of about 25 words instead of
-paragraph-length answers.
-
-**Evidence.** Audio tests for tempo and trimming; beep behaviour covered by
-two tests and confirmed on a live call. Naturalness itself is a human
-judgement. *Local only → client required.*
-
----
-
-## 3. The AI answers without reading the knowledge base
-
-**Cause.** Two separate faults. First, documents indexed with one embedding
-model were being queried with another, so the vectors were not comparable.
-Second — found this round — **a follow-up question retrieved nothing at all**:
-"iska ilaj kya hai?" names no topic, and the search ran on those words alone.
-
-**Changed.** Hybrid retrieval (vector + lexical) with embedding-space metadata
-so mismatched documents are excluded rather than silently mis-ranked; domain
-aliases so "lampi", "lampy", "लम्पी" all reach the Lumpy Skin Disease source;
-and a short follow-up is now prefixed with the caller's previous question
-before retrieval, so the topic carries forward.
-
-**Evidence.** 15 deterministic retrieval tests: seven farmer phrasings
-(English, Devanagari, Hinglish, transliterated, single word) each reach the
-LSD source and not an unrelated document; an unrelated question does not reach
-the LSD source; and a two-turn conversation where the follow-up used to
-retrieve nothing now returns the right document.
-
-**Outstanding.** The client must **re-index the knowledge base** with the
-configured embedding provider — retrieval stays weak on stale vectors no
-matter what the code does. Accuracy against the real PDF is *client
-required*.
-
----
-
-## 4. The agent ignores the caller and talks over them
-
-**Cause.** It had never actually been verified end to end; there was no
-evidence Asterisk was delivering talk events to the worker at all.
-
-**Changed.** `TALK_DETECT(set)=200,500` is applied before the call enters the
-Stasis app; `ChannelTalkingStarted` stops playback, discards the queued
-sentence chunks and starts recording the caller.
-
-**Evidence.** **Verified on real Asterisk 18.10**: the interruption was
-detected **116 ms** after the caller started speaking, playback stopped 2.3 s
-into a 10.4 s clip, recording started 136 ms later, no errors. Re-run after
-the beep fix with the same result.
-
-**Outstanding.** How often GSM line noise or echo of the agent's own voice
-falsely triggers it. *Client required.*
-
----
-
-## 5. Noise and unclear audio
-
-**Cause.** `audioop.ratecv` was resampling 48 kHz → 8 kHz **with no
-anti-aliasing filter**, so 6 kHz energy folded back into the phone band at
-full level.
-
-**Changed.** Band-limited resampler with a windowed-sinc low-pass, peak
-normalisation to −3 dBFS, short fades at clip edges.
-
-**Evidence.** Alias energy **0.0 dB → −79.8 dB**, in-band 3 kHz preserved to
-within 0.01 dB, no clipping.
-
-**Outstanding.** Noise contributed by the GSM path itself, echo and one-way
-audio. *Client required.*
-
----
-
-## 6. Call Centre and admin GUI were never tested
-
-**Cause.** Both existed only as unit-tested code.
-
-**Changed.** Nothing structural this round. A live routing call was placed on
-the development Asterisk: it dialled three destinations in the configured
-priority order and fell back to the AI agent. The admin panel was served and
-its health view read real Asterisk state.
-
-**Outstanding.** A person clicking through the panel in a browser, and
-department routing to real staff mobiles over GSM. *Client required.*
-
----
-
-## 7. Conversation behaviour vs the helpline reference document
-
-**Cause.** The deployed system prompt was a generic "helpful telephone
-assistant for this business". The welcome message was the client's approved
-LUVAS wording, but nothing after it told the agent it was a Lumpy Skin Disease
-helpline, what it must never say, or when to escalate.
-
-**Changed.** A helpline persona is now part of the prompt by default
-(`AI_PERSONA=lsd_helpline`): farmer-friendly spoken Hindi, one idea per turn,
-never diagnoses an animal, never names a medicine or a dose, never discusses
-price, compensation or scheme eligibility, escalates a suspected active case to
-the nearest government veterinary hospital, and attributes ethnoveterinary
-preparations to Sampurna Nand Yadav and colleagues (NDDB). District diagnostic
-centres are loaded from an operator-controlled file and injected verbatim, and
-the agent is explicitly forbidden from naming any centre that is not in it.
-See [helpline behaviour](HELPLINE_BEHAVIOUR.md).
-
-**Evidence.** 22 tests covering the guardrails, the prompt assembly order, and
-the directory — including that an unlisted district produces a refusal rather
-than the wrong centre, and that a broken directory file degrades to naming
-nothing.
-
-**Outstanding.** Two things. **The Haryana district → diagnostic centre list
-still has to be supplied**; it ships empty on purpose. And the persona
-constrains the model, it does not guarantee it — the actual Hindi wording has
-to be reviewed on real calls with the client's Gemini key. *Client required.*
-
----
+The client-provided PDF is **not present in this workspace** — a search of the
+whole repository for `*.pdf` returns nothing. The helpline persona was
+therefore built from the requirements as they were written out in the brief
+(role, tone, turn length, guardrails, escalation, NDDB attribution, district
+routing). **The comparison against the reference document is not complete and
+is not claimed to be.** Add the PDF to the repository and it can be finished.
 
 ## Test run
 
 ```
-pytest -q  →  320 passed, 1 skipped, 0 failed
+pytest -q  →  374 passed, 1 skipped, 0 failed
 ```
 
-The skip is the opt-in real-provider test, which needs live API keys.
+The skip is the opt-in real-provider test, which needs live API keys. 54 of
+those tests were added in this pass.
 
 ## What the client has to do
 
-1. Supply the district diagnostic centre list, and set
-   `REFERRAL_DIRECTORY_PATH`.
-2. Re-index the knowledge base with the configured embedding provider.
-3. `pip install -r requirements.txt`, `alembic upgrade head`, restart the
-   worker and backend.
-4. Make real GSM calls and review: Hindi answer quality, interruption
-   handling, department routing to staff mobiles, and voice naturalness.
-5. Click through the admin panel in a browser.
+1. Supply the district → diagnostic centre list and set `REFERRAL_DIRECTORY_PATH`.
+2. Add the reference PDF to the repository.
+3. Re-index the knowledge base (`scripts/reindex_knowledge.py`) and confirm
+   `stale / unsearchable : 0`.
+4. Work through `docs/CLIENT_UAT_CHECKLIST.md` and send back the failed rows
+   with their log lines or recordings.
