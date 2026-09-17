@@ -1,7 +1,7 @@
 # Implementation Status
 
 Status of every functional area in the architecture document, as of
-2026-09-16 (local AI/RAG hardening added). Honest by rule: **DONE** means built *and* tested; **PARTIAL**
+2026-09-17 (helpline behaviour and LSD retrieval added). Honest by rule: **DONE** means built *and* tested; **PARTIAL**
 means usable but incomplete; **NOT BUILT** means not started; **BLOCKED**
 means it needs hardware, credentials or client input that is not available.
 
@@ -19,7 +19,7 @@ tested on the client machine, not here.
 | 6 | DTMF selection | Digits 1–8 → departments, 9 → AI, 0 → repeat | `ivr.conf`, `departments.conf` | DONE (DTMF mode on the real gateway still to be confirmed) |
 | 7 | Call forwarding to staff mobiles | Department routing: priority order, per-agent backup, fallback | `departments.conf`, `app/services/call_routing.py` | DONE in software — dialling real mobiles is BLOCKED on the trunk + numbers |
 | 8 | AI voice agent | ARI worker: ASR → RAG → LLM → TTS → playback | `app/services/call_controller.py` | PARTIAL — local barge-in and diagnostics added; live voice acceptance outstanding |
-| 9 | PDF knowledge base → RAG | Upload, chunking, embeddings, hybrid pgvector/lexical search | `app/services/knowledge_*.py`, `app/api/knowledge.py` | PARTIAL — live DB/source verification and versioning/re-index remain |
+| 9 | PDF knowledge base → RAG | Upload, chunking, embeddings, hybrid pgvector/lexical search, follow-up topic carry-over | `app/services/knowledge_*.py`, `app/api/knowledge.py` | PARTIAL — deterministic LSD retrieval set passes; live DB/source verification and versioning/re-index remain |
 | 10 | Concurrent calls | Per-channel state, isolated AI sessions | `call_controller.py` | PARTIAL — isolation tested; real multi-channel GSM load not tested |
 | 12 | Server/PBX components | Ubuntu, Asterisk 18.10, Python/FastAPI, PostgreSQL + pgvector | `docs/production-deployment.md` | DONE |
 | 13 | SMG ↔ server SIP/RTP | Working on the client LAN | — | DONE (client machine) |
@@ -30,6 +30,7 @@ tested on the client machine, not here.
 | 18 | Client information required | Outstanding items tracked | `docs/client-information-required.md` | BLOCKED on client |
 | — | Call centre (departments, agents, fallback, history) | Full model, API, routing, dialplan, call history | `app/api/callcentre.py`, `app/models/routing.py` | DONE — managed from the admin panel |
 | — | Admin GUI | Dashboard, departments, staff, routing, call history, knowledge base, AI settings, health, audit — all wired to the real backend | `app/api/admin.py`, `app/static/admin.html`, `app/services/system_config.py`, `app/services/system_health.py` | DONE (KB versioning/re-index and role-based users still missing) |
+| — | Helpline conversation behaviour (LUVAS LSD reference) | Persona prompt with guardrails, escalation and source attribution; verbatim district referral directory | `app/core/personas.py`, `app/core/referral_directory.py`, `docs/HELPLINE_BEHAVIOUR.md` | PARTIAL — rules tested; **district centre list not yet supplied**; spoken wording needs live review |
 | — | AI → human transfer | — | — | NOT BUILT |
 | — | AI barge-in | Asterisk TALK_DETECT → ARI playback cancellation → caller recording | `asterisk/etc/dialplan/ai_agent.conf`, `app/services/call_controller.py` | VERIFIED on real Asterisk (116 ms detection, playback stopped mid-clip, recording started); GSM echo/noise validation still required |
 | — | Monitoring/health endpoints | `/health`, `/ready`, plus measured Asterisk/worker/SIP/resource checks | `app/api/health.py`, `app/services/system_health.py` | PARTIAL — no metrics history or alerting yet |
@@ -51,7 +52,7 @@ tested on the client machine, not here.
 | T-07 | Forward digit 3 | PARTIAL | Same routing code path as T-05 |
 | T-08 | AI route (digit 9) | PASS | Live calls into the AI agent on extension 700 |
 | T-09 | STT accuracy | NOT RUN | Needs the Bhashini key + recorded Hindi samples |
-| T-10 | RAG retrieval | PARTIAL | Hybrid/alias tests added; PostgreSQL-backed source and 20-question accuracy set NOT RUN |
+| T-10 | RAG retrieval | PARTIAL | 15 deterministic LSD retrieval tests pass against PostgreSQL (Hindi/Hinglish/transliterated/short/follow-up); accuracy against the client's real PDF NOT RUN |
 | T-11 | AI answer quality | NOT RUN | Needs a human review pass on the client box |
 | T-12 | TTS quality | PARTIAL | Format/level diagnostics verified locally; real naturalness/noise review outstanding |
 | T-13 | Timeout, no DTMF | PASS | IVR retry/timeout path in `ivr.conf`, exercised in dev |
@@ -65,9 +66,11 @@ tested on the client machine, not here.
 
 1. **On the client machine** — re-index the knowledge base and run live Hindi
    retrieval, latency, voice, noise, echo, and barge-in acceptance tests.
-2. **Knowledge base management** — versions, activate/deactivate, re-index,
+2. **District referral directory** — get the Haryana district → diagnostic
+   centre list from the client and set `REFERRAL_DIRECTORY_PATH`.
+3. **Knowledge base management** — versions, activate/deactivate, re-index,
    and the 20-question accuracy set (T-10).
-3. **AI → human transfer** — a real ARI bridge to a staff member, not just a
+4. **AI → human transfer** — a real ARI bridge to a staff member, not just a
    spoken promise.
-4. **Security** — Fail2Ban, outbound number whitelist, call duration cap.
-5. **Monitoring** — worker/gateway health, latency and error counters.
+5. **Security** — Fail2Ban, outbound number whitelist, call duration cap.
+6. **Monitoring** — worker/gateway health, latency and error counters.

@@ -440,7 +440,9 @@ def test_hindi_caller_messages_are_devanagari_by_default_and_overridable() -> No
 
 
 def test_system_prompt_adds_hindi_policy_only_for_hindi() -> None:
-    settings = _settings(ai_system_prompt="Base prompt.")
+    # Persona off: this test is about the language policy alone (the helpline
+    # persona has its own tests in test_helpline_persona.py).
+    settings = _settings(ai_system_prompt="Base prompt.", ai_persona="")
     hindi = settings.system_prompt_for("hi")
     assert hindi.startswith("Base prompt.")
     assert LANGUAGE_POLICIES["hi"] in hindi

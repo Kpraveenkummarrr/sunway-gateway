@@ -37,7 +37,11 @@ EDITABLE_KEYS: dict[str, EditableSetting] = {
     s.key: s
     for s in (
         EditableSetting("ai_language", str, "Conversation language", choices=("hi", "en")),
-        EditableSetting("ai_system_prompt", str, "AI persona / system prompt"),
+        EditableSetting("ai_system_prompt", str, "System prompt (base)"),
+        # "" turns the helpline rules off and leaves the base prompt alone.
+        EditableSetting(
+            "ai_persona", str, "Helpline persona", choices=("lsd_helpline", "")
+        ),
         EditableSetting("ai_welcome_message", str, "Welcome message"),
         EditableSetting("ai_error_message", str, "Error message"),
         EditableSetting("ai_goodbye_message", str, "Goodbye message"),

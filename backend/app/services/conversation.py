@@ -27,7 +27,12 @@ from app.providers.embeddings.base import EmbeddingProvider
 from app.providers.llm.base import LLMMessage, LLMProvider
 from app.providers.stt.base import STTProvider
 from app.providers.tts.base import SynthesisResult, TTSProvider
-from app.services.knowledge_search import SearchError, SearchResult, search_chunks
+from app.services.knowledge_search import (
+    SearchError,
+    SearchResult,
+    build_retrieval_query,
+    search_chunks,
+)
 from app.services.rag_context import build_context
 
 logger = get_logger(__name__)
@@ -150,8 +155,16 @@ async def handle_text_turn(
     timings: dict[str, int] = {}
 
     async def _pipeline() -> tuple[list[SearchResult], object, int]:
+        # Fetched before retrieval, not just for the LLM: a short follow-up
+        # needs the previous caller utterance to be searchable at all.
+        history = await get_history(db, session.id)
+        search_text = build_retrieval_query(
+            user_text,
+            [m.text or "" for m in history[:-1] if m.role == "caller"],
+        )
+
         embed_started = time.monotonic()
-        query_embedding = await embedding_provider.embed_one(user_text)
+        query_embedding = await embedding_provider.embed_one(search_text)
         timings["embedding"] = int((time.monotonic() - embed_started) * 1000)
         # Keep the old key for callers that consumed the pre-existing timing
         # dictionary while exposing the clearer public name.
@@ -163,7 +176,7 @@ async def handle_text_turn(
                 search_chunks(
                     db,
                     query_embedding=query_embedding,
-                    query_text=user_text,
+                    query_text=search_text,
                     top_k=settings.rag_top_k,
                     similarity_threshold=settings.rag_similarity_threshold,
                     embedding_space=embedding_provider.embedding_space,
@@ -178,12 +191,13 @@ async def handle_text_turn(
         context_started = time.monotonic()
         context = build_context(retrieved, max_chars=settings.ai_max_context_chars)
         timings["context"] = int((time.monotonic() - context_started) * 1000)
-        history = await get_history(db, session.id)
         llm_history = _history_to_llm_messages(history, max_messages=settings.ai_max_history_messages)
 
         llm_started = time.monotonic()
         llm_response = await llm_provider.generate_response(
-            system_prompt=settings.system_prompt_for(session.language),
+            system_prompt=settings.system_prompt_for(
+                session.language, caller_text=user_text
+            ),
             history=llm_history,
             retrieved_context=context,
         )

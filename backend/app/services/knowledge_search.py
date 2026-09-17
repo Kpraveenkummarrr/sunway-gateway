@@ -77,6 +77,32 @@ def lexical_terms(query: str) -> list[str]:
     return terms
 
 
+# A caller's follow-up ("iska ilaj kya hai?") names no topic at all, so on its
+# own it retrieves nothing. Below this many meaningful terms the previous
+# caller utterance is folded into the retrieval query to carry the topic
+# forward. The caller's own words are always kept, never replaced.
+FOLLOW_UP_MAX_TERMS = 4
+
+
+def build_retrieval_query(user_text: str, previous_user_texts: list[str] | None = None) -> str:
+    """The text used for embedding and lexical retrieval for this turn.
+
+    Long or topic-naming utterances are used as they are. A short follow-up is
+    prefixed with the most recent earlier caller utterance so that pronouns
+    ("iska", "uska") still resolve to a searchable topic.
+    """
+    text = (user_text or "").strip()
+    if not text:
+        return text
+    if len(lexical_terms(text)) > FOLLOW_UP_MAX_TERMS:
+        return text
+    for previous in reversed(previous_user_texts or []):
+        previous = (previous or "").strip()
+        if previous and previous != text:
+            return f"{previous} {text}"
+    return text
+
+
 def lexical_match_score(text: str, terms: list[str]) -> float:
     """Return a bounded lexical overlap score for ranking candidates."""
     normalized = normalize_search_text(text)

@@ -1,0 +1,20 @@
+{
+  "_comment": [
+    "District diagnostic centres the helpline agent is allowed to name.",
+    "Copy this file, fill in the centres from the LUVAS helpline document,",
+    "and point REFERRAL_DIRECTORY_PATH at the copy.",
+    "Required per entry: district, name. Optional: phone, address, aliases",
+    "(other spellings, including Devanagari, that a caller may say).",
+    "Entries are read out exactly as written here and are the ONLY centres",
+    "the agent may name — it is left empty on purpose so that nothing is",
+    "invented before the real list is supplied."
+  ],
+  "_example_entry": {
+    "district": "Hisar",
+    "name": "Disease Diagnostic Laboratory, LUVAS Hisar",
+    "phone": "01662-000000",
+    "address": "LUVAS campus, Hisar",
+    "aliases": ["हिसार", "Hissar"]
+  },
+  "centres": []
+}
