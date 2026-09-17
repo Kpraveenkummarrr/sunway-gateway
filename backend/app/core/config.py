@@ -146,6 +146,21 @@ class Settings(BaseSettings):
     gemini_model: str = "gemini-2.5-flash"
     gemini_reasoning_effort: str = "none"
 
+    # Sarvam-M as a local LLM (LLM_PROVIDER=sarvam_m) — an alternative to
+    # the paid Gemini API, evaluated on request. Never auto-downloaded: the
+    # operator places an already-downloaded GGUF at this path. See
+    # app/services/hardware_check.py and scripts/check_sarvam_hardware.py —
+    # run that check before setting LLM_PROVIDER=sarvam_m in production.
+    sarvam_m_model_path: str = ""
+    sarvam_m_context_tokens: int = 4096
+    # 0 = CPU only. Set to the hardware check's recommended_gpu_layers (-1
+    # for full GPU offload) only after confirming the GPU has the VRAM for it.
+    sarvam_m_gpu_layers: int = 0
+    # Skips the hardware check only for a deliberate lab test on a smaller
+    # stand-in GGUF on hardware that would fail the real Sarvam-M's
+    # requirements — never leave this off in production.
+    sarvam_m_require_hardware_check: bool = True
+
     stt_provider: str = ""
     stt_api_key: str = ""
     stt_model: str = ""

@@ -75,6 +75,10 @@ async def main() -> None:
         settings.ai_end_of_speech_silence_seconds,
         settings.ai_tts_speed,
     )
+    # Explicit, unambiguous, human-readable — separate from the raw
+    # LLM_PROVIDER config string above so it's obvious at a glance in the
+    # logs which actual backend a call will be answered by (never logs a key).
+    logger.info("LLM provider: %s", llm_provider.provider_name)
     if settings.tts_provider.strip().lower() == "bhashini":
         logger.info(
             "Bhashini TTS base configuration: service_id=%s gender=%s language=%s local_tempo=%.2fx target_rate=8000Hz",

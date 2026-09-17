@@ -43,8 +43,21 @@ def get_llm_provider(settings: Settings) -> LLMProvider:
             reasoning_effort=settings.gemini_reasoning_effort or None,
         )
 
+    if provider_name == "sarvam_m":
+        from app.providers.llm.sarvam_m_provider import SarvamMProvider
+
+        return SarvamMProvider(
+            model_path=settings.sarvam_m_model_path,
+            context_tokens=settings.sarvam_m_context_tokens,
+            max_tokens=settings.llm_max_tokens,
+            gpu_layers=settings.sarvam_m_gpu_layers,
+            timeout_seconds=settings.provider_timeout_seconds,
+            require_hardware_check=settings.sarvam_m_require_hardware_check,
+        )
+
     raise LLMProviderError(
         "No LLM provider configured. Set LLM_PROVIDER to 'gemini' (with "
-        "GEMINI_API_KEY) or 'openai' (with LLM_API_KEY) for real responses, "
+        "GEMINI_API_KEY), 'openai' (with LLM_API_KEY), or 'sarvam_m' (with "
+        "SARVAM_M_MODEL_PATH pointing at a local GGUF) for real responses, "
         "or 'mock' for local development/testing only."
     )

@@ -188,6 +188,24 @@ async def handle_text_turn(
             raise SearchError(f"RAG search timed out after {settings.provider_timeout_seconds}s") from exc
         logger.info("rag stage: %dms, %d chunks", timings["rag"], len(retrieved))
 
+        # For an LLM-provider A/B comparison to be valid, both providers must
+        # be shown this is the exact same retrieval for the exact same turn —
+        # this is the evidence trail for that, not just a debugging line.
+        turn_number = sum(1 for m in history if m.role == "agent") + 1
+        document_ids = sorted({str(r.document_id) for r in retrieved})
+        chunk_ids = [str(r.chunk_id) for r in retrieved]
+        logger.info(
+            "RAG turn provider=%s session=%s call=%s turn=%d retrieval_count=%d "
+            "document_ids=%s chunk_ids=%s",
+            llm_provider.provider_name,
+            session.id,
+            session.call_id,
+            turn_number,
+            len(retrieved),
+            document_ids,
+            chunk_ids,
+        )
+
         context_started = time.monotonic()
         context = build_context(retrieved, max_chars=settings.ai_max_context_chars)
         timings["context"] = int((time.monotonic() - context_started) * 1000)

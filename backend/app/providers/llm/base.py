@@ -23,6 +23,13 @@ class LLMProvider(ABC):
     """Abstraction over LLM vendors so the conversation orchestration layer
     isn't hard-coded to one provider."""
 
+    @property
+    def provider_name(self) -> str:
+        """Human-readable provider identity for logs and A/B evidence
+        (e.g. "Gemini", "Sarvam-M local"). Defaults to the class name so a
+        provider that doesn't override this still logs something useful."""
+        return type(self).__name__
+
     @abstractmethod
     async def generate_response(
         self,

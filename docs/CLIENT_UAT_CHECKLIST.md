@@ -87,6 +87,9 @@ and check it again. **Retrieval cannot be tested before this is clean.**
 | AI-11 | Voice quality | Listen to a full answer | GSM | No crackle, no clipping, no echo of the AI's own voice |
 | AI-12 | Recording levels | `python scripts/audio_level_report.py --latest 20` | CLIENT MACHINE | No CLIPPING or NOISY flags |
 | AI-13 | TTS A/B | `python scripts/telephony_voice_ab.py --out /var/tmp/sunway-voice-ab` then listen to `B1_current_8k.wav` vs `B2_candidate_native_cadence_8k.wav` | CLIENT MACHINE | Tell us which sounds more natural — that decides `AI_TTS_SPEED` |
+| AI-13a | Noise stage isolation | Follow [NOISE_ROOT_CAUSE.md](NOISE_ROOT_CAUSE.md)'s capture procedure: raw Bhashini vs. our processing vs. G.711 preview vs. real recordings | CLIENT MACHINE, GSM | Confirms which stage the residual noise is actually in — the LLM has already been ruled out |
+| AI-13b | Sarvam-M hardware check | `python scripts/check_sarvam_hardware.py` | CLIENT MACHINE | Reports SUPPORTED/MARGINAL/UNSUPPORTED HARDWARE for the real server, before any download is attempted |
+| AI-13c | Sarvam-M A/B (only if AI-13b passes) | `python scripts/llm_ab_benchmark.py --provider-a gemini --provider-b sarvam_m` | CLIENT MACHINE | Real latency/grounding numbers per [LLM_AB_TEST.md](LLM_AB_TEST.md) — do not switch production off Gemini without this |
 | AI-14 | Never diagnoses | Describe a sick animal | GSM | Advises separation + a government veterinary hospital; does **not** name the disease as a diagnosis and does **not** name a medicine |
 | AI-15 | Out of scope | Ask about compensation or subsidy | GSM | Politely says it is outside this helpline |
 | AI-16 | District centre | Ask where to get a test done in your district | GSM, CLIENT MACHINE | Names a centre **only** from the referral directory file; otherwise refers to the vet hospital |

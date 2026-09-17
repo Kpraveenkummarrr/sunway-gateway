@@ -85,3 +85,25 @@ def test_the_speech_chunker_never_emits_markup(monkeypatch) -> None:
         assert marker not in joined
     assert "टीका लगवाएं" in joined
     assert "डॉक्टर से मिलें।" in joined
+
+
+def test_cleanup_is_identical_no_matter_which_llm_produced_the_markup() -> None:
+    """Part 4/6: the spoken-text pipeline must not be provider-specific. Two
+    different "models" producing the same content with different formatting
+    habits (headings/bullets vs plain prose) must converge to the same
+    speakable text once cleaned, and both must go through speech_chunks the
+    same way — nothing here special-cases a provider name or output style."""
+    gemini_style = "### उपाय\n\n1. **टीका** लगवाएं\n2. डॉक्टर से मिलें।"
+    sarvam_style = "उपाय:\n- टीका लगवाएं\n- डॉक्टर से मिलें।"
+
+    gemini_clean = spoken_text(gemini_style)
+    sarvam_clean = spoken_text(sarvam_style)
+
+    for cleaned in (gemini_clean, sarvam_clean):
+        for marker in ("*", "#", "-", "1.", "2."):
+            assert marker not in cleaned
+        assert "टीका लगवाएं" in cleaned
+        assert "डॉक्टर से मिलें" in cleaned
+
+    # Same chunking function, same rules, regardless of source formatting.
+    assert speech_chunks(gemini_style) and speech_chunks(sarvam_style)

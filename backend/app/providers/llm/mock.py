@@ -26,6 +26,10 @@ class MockLLMProvider(LLMProvider):
         self.last_history: list[LLMMessage] | None = None
         self.last_retrieved_context: str | None = None
 
+    @property
+    def provider_name(self) -> str:
+        return "Mock"
+
     async def generate_response(
         self,
         *,
