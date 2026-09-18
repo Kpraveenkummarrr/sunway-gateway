@@ -1,5 +1,8 @@
 # UAT Readiness
 
+**Current release:** see [final-pass readiness](#final-pass). Earlier pass results
+are historical; this candidate is not approved for client acceptance.
+
 Date: 2026-09-17 · Third pass — Sarvam-M feasibility and noise root-cause · Baseline commit: `713eceb`
 
 Evidence rule: **VERIFIED** means measured on a real system and reproducible;
@@ -103,3 +106,60 @@ noise/disturbance is actually in (the LLM has been ruled out; see
 [NOISE_ROOT_CAUSE.md](NOISE_ROOT_CAUSE.md)). Real Sarvam-M latency and
 Hindi-quality numbers also cannot be produced here — no machine available
 to this session passes its own hardware check.
+<a id="final-pass"></a>
+
+# Final-pass readiness — updated 2026-09-18
+
+**Engineering candidate; NOT approved for client acceptance or unattended deployment.**
+Branch: `engineering/final-uat-20260917`; preserved baseline: `2fcc966`.
+No live configuration/model/codec change has been applied to the client.
+
+Implemented: playback-event ordering and cleanup, duplicate-recording protection,
+per-call settings, safe cancellation/retrieval error handling, strict embedding
+provenance and batch validation, NUL cleanup, grounded empty-context fallback,
+private admin signing and production-auth guards, correct readiness status,
+bare-URL cleanup, empty-staff fallback, richer A/B diagnostics, optional verified
+CPU embedding candidate, real-index probe and client stability sampler.
+
+Local baseline: **408 passed, 1 skipped**. Targeted revised suite: **82 passed**.
+Additional corrected security/grounding/reindex/audio suites: **93 passed**.
+Final continuation checks: **212 passed, 2 failed** in 42.30 s across 19 selected
+suites. Both failures are the real-DB persona tests: Windows cannot connect to
+PostgreSQL (`ConnectionRefusedError`, `WinError 1225`). A separate reindex run
+stopped with **1 setup error** for the same connection failure. The earlier
+focused playback/audio/embedding run passed **53 tests** in 6.62 s. Compilation
+passed. The semantic probe correctly rejects mock embeddings. After the last
+code edits, the final focused playback/security/readiness/audio/AGI run passed
+**61 tests in 12.29 s**, and compilation passed again.
+
+The final `pytest -q --tb=short` attempt was interrupted after repeated connection
+failures; there is **no completed green final full-suite result**. The earlier
+completed interim result was **424 passed, 2 failed, 1 skipped**; its two test
+fixture assumptions were corrected and the subsequent focused run passed 93.
+Those earlier results do not substitute for a final full rerun.
+Real-provider integration remains opt-in and is skipped without keys.
+
+On resumption, Ubuntu WSL was stopped. Starting the existing local distribution
+made PostgreSQL 14 report online/accepting connections inside Linux, but Windows
+localhost access remained refused. No PostgreSQL configuration, firewall or
+production service was changed to bypass this. Restore the local test connection
+and rerun `pytest -q` against the development/test DB before promoting the branch.
+The welcome-cache test now checks that synthesis is never called again, instead
+of conflating unrelated database startup time with a TTS-cache latency guarantee.
+
+Blockers: raw Hindi TTS/GSM recordings; deployed codec/RTP/echo evidence;
+actual semantic provider + client PDF relevance; physical interruption/onset
+capture; complete staff-only call history; real browser workflows; 30-minute
+stability and multi-SIM concurrency. The Browser skill could not execute because
+its required browser JavaScript tool is absent in this session.
+
+The generated harmonic/codec WAVs are **synthetic probes**, not a Bhashini demo.
+Local model benchmarking was not feasible with 479 MB available RAM at inspection;
+Gemini/Sarvam benchmark attempts both recorded unavailable. No model winner was invented.
+
+Follow [exact deployment/backup/reindex/voice/GSM/rollback commands](CLIENT_UAT_CHECKLIST.md),
+[root-cause report](FINAL_ROOT_CAUSE_REPORT.md), and [A01–A27 acceptance matrix](CLIENT_ISSUES_STATUS.md).
+Historical reports above are retained for traceability; they are not new physical
+evidence for this release.
+
+---

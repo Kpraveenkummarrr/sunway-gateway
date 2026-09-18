@@ -1,5 +1,8 @@
 # Client issues — current status
 
+**Current release:** the [final-pass matrix](#final-pass) supersedes the historical
+status claims below. Physical GSM acceptance remains outstanding.
+
 Date: 2026-09-17 · Third pass — Sarvam-M local-LLM feasibility and noise root-cause
 
 **Status meanings.** FIXED = closed with evidence on this machine, nothing
@@ -60,3 +63,56 @@ independence).
    the remaining GSM-path noise.
 6. Work through `docs/CLIENT_UAT_CHECKLIST.md` and send back the failed rows
    with their log lines or recordings.
+<a id="final-pass"></a>
+
+# Final-pass acceptance matrix — 2026-09-17
+
+This section supersedes historical readiness claims above for the current
+release candidate. Local tests do not establish physical GSM or browser acceptance.
+Latest checks (2026-09-18): 212 passed, 2 database-connection failures; final full
+rerun is environment-blocked. See [test evidence](UAT_READINESS.md#final-pass).
+
+| Client Complaint | Root Cause | What Changed | Measurement | Live Evidence | Status |
+|---|---|---|---|---|---|
+| Long response lag | Proven playback-event race; buffered provider calls and endpointing add other delays | Pre-register playback; corrected timing labels; cancel ended turns | Early-event regression <250 ms bound; vendor latency unavailable | None this pass | PARTIALLY FIXED |
+| Robotic/unclear/noisy voice | Not localized without stage captures | Same-source 1.00/1.10/1.15x bundle, spectral/F0 diagnostics; no blind DSP tuning | Synthetic alias -78.27 dB, zero fixture clipping | Raw Hindi and GSM recordings absent | CLIENT UAT REQUIRED |
+| KB not read correctly | Mock vectors; unknown space admitted; weak follow-up carryover; partial invalid-batch writes | Production mock guard, strict provenance, safe reindex, optional real local candidate | DB regressions; no real semantic benchmark yet | Actual 123 chunks unavailable | PARTIALLY FIXED |
+| Ignores interruption | Race/duplicate-event hazards; file-based capture has no preroll | Reliable playback listener, queued-task cleanup, duplicate claim, stop failure handling | Automated lifecycle/interruption suite | No fresh physical GSM interruption | PARTIALLY FIXED |
+| Call-centre fallback/history | Empty staff list incorrectly treated as invalid route; ordinary IVR lifecycle not fully persisted | Fixed zero-staff fallback discrimination | AGI/API tests | Staff/GSM history still unverified | PARTIALLY FIXED |
+| Admin/security | Public fallback signing key, nonfinite setting acceptance, degraded ready returned 200 | Private cookie signing, fail-closed production auth, finite settings, ready503, per-call settings | Auth/settings/API regressions | Browser unavailable | PARTIALLY FIXED |
+| Commercial stability/concurrency | Not demonstrated end-to-end | Ephemeral speech cleanup, read-only long-run sampler and exact UAT | Automated isolation; one sampler smoke run only | No 30-minute/two-SIM evidence | CLIENT UAT REQUIRED |
+
+| ID | Acceptance area | CODE TEST | LIVE TEST / EVIDENCE | STATUS |
+|---|---|---|---|---|
+| A01 | Latency | race + stage logging | Client endpoint-to-audible p50/p95 pending | PARTIALLY FIXED |
+| A02 | First audio | local-ready and playback request separated | Handset onset pending | CLIENT UAT REQUIRED |
+| A03 | Complete response | bounded buffered completion/TTS pipeline | Real model latency pending | CLIENT UAT REQUIRED |
+| A04 | RAG | strict space/batch tests, semantic probe | Real provider + source-owner relevance labels absent | PARTIALLY FIXED |
+| A05 | Follow-up | multi-turn topic regression | Hindi pronoun/acknowledgement/topic-change review pending | PARTIALLY FIXED |
+| A06 | Hindi | persona/spoken-text/provider shape tests | Hindi-speaking operator required | CLIENT UAT REQUIRED |
+| A07 | Hinglish | query construction fixtures | Real ASR/embedding/LLM evaluation pending | CLIENT UAT REQUIRED |
+| A08 | Robotic quality | no numerical “naturalness” claim | Blind listening pending | CLIENT UAT REQUIRED |
+| A09 | Raw TTS | WAV validation, generation timer | No raw Bhashini WAV available | BLOCKED |
+| A10 | Processed TTS | synthetic DSP + 3 tempos | Real same-source comparison pending | PARTIALLY FIXED |
+| A11 | GSM clarity | no simulation substitute | Synway/SIM/handset required | CLIENT UAT REQUIRED |
+| A12 | Noise | clipping/spectral/alias metrics | stage capture + echo/radio isolation pending | CLIENT UAT REQUIRED |
+| A13 | Interruption | cancellation/race suite | start/middle/end phone interruptions pending | PARTIALLY FIXED |
+| A14 | Repeated interruption | generation/dedup tests | repeated/noisy/short utterances pending | PARTIALLY FIXED |
+| A15 | ASR | protocol/audio/error tests | Human transcripts + WER pending | CLIENT UAT REQUIRED |
+| A16 | IVR | routing/AGI tests | digits/repeat/invalid/timeout audible prompts pending | CLIENT UAT REQUIRED |
+| A17 | Department | CRUD and routing tests | no-staff fallback and live effect pending | PARTIALLY FIXED |
+| A18 | Staff | ordering/backup tests | availability/actual mobile calls pending | CLIENT UAT REQUIRED |
+| A19 | Fallback | route-found fix regression | busy/noanswer/backend-offline scenarios pending | PARTIALLY FIXED |
+| A20 | Call history | attempt API tests | Ordinary staff-only lifecycle gap remains | PARTIALLY FIXED |
+| A21 | GUI | API, auth and static panel checks | Browser execution tool unavailable | BLOCKED |
+| A22 | KB upload | NUL/extraction/ingestion tests | Client PDF reupload/status review pending | PARTIALLY FIXED |
+| A23 | Re-index | stale/malformed/DB tests | real-provider reindex + relevance proof pending | PARTIALLY FIXED |
+| A24 | System health | readiness/auth checks, probe | Client systemd/ARI/DB observation pending | PARTIALLY FIXED |
+| A25 | Long stability | probe smoke only | 30-minute live run not performed | CLIENT UAT REQUIRED |
+| A26 | Concurrency | automated isolation only | Two simultaneous gateway channels not tested | CLIENT UAT REQUIRED |
+| A27 | Security | signed-cookie/fail-closed tests | TLS, service user, SIP/ARI network exposure review pending | PARTIALLY FIXED |
+
+No row is marked FIXED where a required physical test has not been performed.
+See [root-cause report](FINAL_ROOT_CAUSE_REPORT.md) and [client commands](CLIENT_UAT_CHECKLIST.md).
+
+---

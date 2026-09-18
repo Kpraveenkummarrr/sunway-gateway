@@ -1,5 +1,8 @@
 # Client UAT checklist
 
+**Current release:** use the [final-pass execution sheet](#final-pass) below for
+backup, deployment, reindex, voice/GSM tests and rollback. Earlier sections are historical.
+
 Every test needed to accept the system, and who can run it.
 
 | Tag | Meaning |
@@ -129,3 +132,233 @@ either the matching `Turn timing` / `RAG retrieval` log lines from
 `journalctl -u sunway-ai-worker` or the recording under
 `/var/spool/asterisk/recording`. A description without one of those cannot be
 diagnosed from here.
+<a id="final-pass"></a>
+
+# Final-pass client execution sheet — 2026-09-17
+
+These commands are **operator steps**, not a claim they ran on the client.
+Do not paste credentials, raw calls or pcaps into public issues. Obtain recording
+consent and restrict all diagnostic files. Use a maintenance window and a Hindi-speaking tester.
+
+## 1. Preserve the actual client baseline
+
+On `/home/admin1/sunway-gateway` (not the Windows development laptop):
+
+```bash
+cd /home/admin1/sunway-gateway
+git status --short
+git branch --show-current
+git rev-parse HEAD
+```
+
+Stop if the worktree is dirty; preserve those changes with the operator before
+switching code. Confirm the real DB name and service paths; repository service
+templates still use `/opt/sunway-gateway`, so do not overwrite installed units.
+
+```bash
+umask 077
+backup_dir="$HOME/sunway-backup-$(date +%Y%m%d-%H%M%S)"
+mkdir -m 700 "$backup_dir"
+git rev-parse HEAD > "$backup_dir/code-revision.txt"
+cp -p backend/.env "$backup_dir/backend.env"
+sudo cp -a /etc/asterisk "$backup_dir/asterisk"
+sudo systemctl cat sunway-backend sunway-ai-worker > "$backup_dir/services.txt"
+sudo -u postgres pg_dump -Fc sunway_gateway > "$backup_dir/database.dump"
+test -s "$backup_dir/database.dump"
+printf 'Private rollback directory: %s\n' "$backup_dir"
+```
+
+The DB dump includes admin runtime settings and old embeddings. Keep the backup
+on this host under restricted permissions. Never commit it. No `.env` changes
+are necessary for the media/security fixes except configuring strong private
+admin/API keys if currently absent.
+Prefer a separate, high-entropy `APP_SECRET_KEY` (at least 32 random bytes),
+plus strong `ADMIN_PASSWORD` and `INTERNAL_API_KEY`, stored only in the private
+environment. Password fallback removes the public-key vulnerability but is not
+a substitute for a strong independent signing secret. Set `APP_ENV=production`
+only after choosing real embeddings; dev/test mode intentionally permits local
+unauthenticated access when no credentials are configured. Existing admin
+sessions may require login again after the signing change.
+
+## 2. Transfer and stage the engineering branch
+
+The branch is local until deliberately published. From the development repo,
+`git bundle create sunway-final-uat.bundle engineering/final-uat-20260917`.
+Transfer that bundle through the operator-approved channel; then on the client:
+
+```bash
+cd /home/admin1/sunway-gateway
+git bundle verify /path/to/sunway-final-uat.bundle
+git fetch /path/to/sunway-final-uat.bundle engineering/final-uat-20260917:engineering/final-uat-20260917
+git switch engineering/final-uat-20260917
+cd backend
+.venv/bin/python -m compileall -q app scripts
+.venv/bin/python scripts/telephony_voice_ab.py --help
+.venv/bin/python scripts/reindex_knowledge.py --help
+```
+
+Run `pytest -q` **against an isolated migrated test database**, not the live
+client database: tests create/delete fixtures and some update runtime settings.
+Do not install optional local model dependencies into the live venv first.
+No database schema migration is added by this pass.
+
+When the operator approves the maintenance deployment:
+
+```bash
+sudo systemctl restart sunway-backend sunway-ai-worker
+curl --fail http://127.0.0.1:8000/ready
+sudo systemctl is-active sunway-backend sunway-ai-worker asterisk postgresql
+```
+
+Review and apply **only the ROUTE_FOUND patch** to the installed departments
+dialplan and matching `route_agi.py`; preserve client trunk/endpoint/local
+contexts. Do not run the broad template deploy script over the working client
+configuration. Then `sudo asterisk -rx 'dialplan reload'` and inspect
+`sudo asterisk -rx 'dialplan show departments'` before routing a test call.
+
+## 3. Choose and verify real embeddings
+
+Do not set `APP_ENV=production` while leaving mock embeddings selected; the
+intentional production guard rejects them. The optional local candidate needs
+memory headroom for both API and worker copies. Inspect `free -m`, `df -h`,
+`lscpu` and WSL limits before installing anything.
+
+In a separate staging venv, install `requirements.txt` then
+`requirements-local-embeddings.txt`. Download the model once under an operator
+chosen revision (never during a live call):
+
+```bash
+.venv-staging/bin/python -c "from huggingface_hub import snapshot_download; snapshot_download('qdrant/paraphrase-multilingual-MiniLM-L12-v2-onnx-Q', revision='OPERATOR_VERIFIED_REVISION', local_dir='/var/lib/sunway/models/multilingual-minilm')"
+sha256sum /var/lib/sunway/models/multilingual-minilm/model_optimized.onnx
+```
+
+Set the exact measured SHA in a private staging env:
+
+```dotenv
+RAG_EMBEDDING_PROVIDER=local
+RAG_LOCAL_MODEL_PATH=/var/lib/sunway/models/multilingual-minilm
+RAG_LOCAL_MODEL_SHA256=<64-character measured hash>
+RAG_LOCAL_THREADS=2
+RAG_EMBEDDING_DIMENSIONS=1536
+```
+
+Alternatively use the existing paid API configuration in [RAG report](RAG_ROOT_CAUSE.md).
+No current model has passed the real client semantic benchmark yet. Keep the
+worker out of service while replacing the embedding space and reindexing.
+
+```bash
+cd /home/admin1/sunway-gateway/backend
+.venv/bin/python scripts/reindex_knowledge.py --status
+.venv/bin/python scripts/reindex_knowledge.py
+.venv/bin/python scripts/reindex_knowledge.py --status
+.venv/bin/python scripts/rag_uat_probe.py --out /var/tmp/sunway-rag-unique-run.json
+```
+
+Use the venv containing the chosen provider. Confirm the 46-page client PDF and
+expected 123 chunks (or explain any deliberate rechunking). Label the retrieved
+passages for all mandatory Hindi/Hinglish queries; do not count merely finding
+any LSD paragraph as answering the particular question. Reject stale/mixed spaces.
+
+## 4. Raw Hindi and tempo A/B
+
+```bash
+cd /home/admin1/sunway-gateway/backend
+umask 077
+.venv/bin/python scripts/telephony_voice_ab.py --out /var/tmp/sunway-hindi-unique-run
+```
+
+Live mode requires real Bhashini credentials and effective `AI_LANGUAGE=hi`.
+Use a new output directory for every run. It saves untouched source, resample-only,
+current processing, native cadence, 1.10x, 1.15x and G.711 previews plus metrics.
+If the DB override lookup fails, correct it; `--env-only` is an explicit offline
+choice, not evidence of effective client settings. For an already captured WAV:
+
+```bash
+.venv/bin/python scripts/telephony_voice_ab.py --env-only \
+  --input-wav /private/raw_bhashini.wav --text 'Exact spoken Hindi transcript' \
+  --current-speed 1.15 --out /var/tmp/sunway-hindi-offline-unique-run
+```
+
+Have the tester listen blind to raw and converted speech. Only then test an
+authorized alternative service with `--candidate-service-id ACTUAL_AUTHORIZED_ID`.
+The service list alone does not prove access or that a model is better.
+
+## 5. Trace Asterisk → RTP → Synway → GSM
+
+Before/during the same controlled call:
+
+```bash
+sudo asterisk -rx 'core show version'
+sudo asterisk -rx 'core show channels concise'
+sudo asterisk -rx 'pjsip show endpoints'
+sudo asterisk -rx 'core show translation'
+sudo asterisk -rx 'module show like format_wav'
+sudo asterisk -rx 'pjsip show endpoint ACTUAL_GATEWAY_ENDPOINT'
+sudo asterisk -rx 'core show channel ACTUAL_CHANNEL_NAME'
+sudo journalctl -u sunway-ai-worker --since '10 minutes ago' --no-pager
+```
+
+For a bounded capture, substitute the real gateway IP (confirmed by operator):
+
+```bash
+umask 077
+sudo timeout 120 tcpdump -i any -s 0 -w /var/tmp/sunway-controlled-call.pcap \
+  'host ACTUAL_GATEWAY_IP and udp'
+sudo chmod 600 /var/tmp/sunway-controlled-call.pcap
+```
+
+This includes SIP/SDP **and RTP/RTCP**, not just the media-port range. Capture may
+include authentication metadata and private voice: restrict and redact before
+sharing. If SIP is TCP/TLS, capture the actual negotiated transport separately;
+do not infer SDP from an incomplete UDP capture.
+
+In Wireshark, identify that call's SDP and RTP streams; record codec/payload,
+clock rate, packetization, packet loss, sequence gaps, delta/jitter and RTCP.
+Check capture drops and interface duplication before attributing network loss.
+Decode/export the outgoing RTP audio where supported. For an Asterisk sent-audio
+recording, have the operator add a temporary, consented split-direction
+MixMonitor in the **actual test context**, then remove it after testing; do not
+modify production routing blindly. Compare that audio to converted WAV and handset.
+
+Play **the same cached WAV** repeatedly for softphone and GSM comparison; do not
+regenerate model replies each time. Record at least one consented handset result.
+Repeat on another SIM/channel and handset. Note radio signal, gain, echo settings,
+firmware and time. Change one factor per experiment. No arbitrary codec/jitter changes.
+
+## 6. Conversation, routing, GUI, long run and concurrency
+
+- Interruption: start/middle/end, short/long/repeated speech, queued chunk, GSM noise. Measure actual speech onset to audio stop; verify no missing first word, stale reply or double playback. TALK_DETECT event-to-stop is only a software subset.
+- ASR: retain consented clean/fast/farmer/noisy/Hinglish/yes-no audio with human transcripts; compute word errors, inspect first-syllable loss after barge-in.
+- Conversation: one question at a time; haan/haanji/accha/theek-hai; pronouns; explicit topic changes; unclear input; active case/referral; no diagnosis or prohibited medication/dose. Source-owner review is required, not just prompt presence.
+- IVR: digits 1–8, 9 AI, 0 repeat, invalid/timeout, active/inactive staff, priority/backup, busy/no-answer/no-staff, backend unavailable, hangup. Confirm call history for staff-only calls (known lifecycle gap).
+- Browser: login/logout, dashboard, departments/staff CRUD, routing, refresh and next-call live effect, history, upload, index status/reindex/search, AI settings, health, audit. Inspect console/network errors and verify no secrets. Use test records and preserve existing data.
+
+During at least 30 minutes of real calls, with operator-selected overlapping
+calls on **two actual gateway channels**, run:
+
+```bash
+cd /home/admin1/sunway-gateway/backend
+worker_pid=$(systemctl show sunway-ai-worker -p MainPID --value)
+test "$worker_pid" -gt 0
+.venv/bin/python scripts/client_uat_probe.py --duration 1800 --interval 10 \
+  --worker-pid "$worker_pid" --out /var/tmp/sunway-stability-unique-run.jsonl
+```
+
+The sampler records real service/DB health, channel count, CPU ticks, RSS/VM,
+threads, FDs and child IDs where Linux permissions permit. Also retain restricted
+worker/Asterisk error/reconnect logs. The tool does not create calls or certify
+memory safety automatically. Compare beginning/end and peak values; reject
+unexplained growth, leaked calls, failed health, stale playback or untested channels.
+
+## 7. Rollback
+
+Stop the worker in the maintenance window. Restore code to the revision captured
+in `code-revision.txt` with `git switch --detach <captured-revision>` (first verify
+the worktree is clean). Restore the private env and only the exact dialplan/AGI
+files modified in this deployment; restart services and recheck `/ready`.
+No schema change needs rollback. If embeddings changed, restore the old provider
+configuration and reindex with it, or restore the backup **into a separate DB**
+and review before switching. Do not overwrite post-backup calls with a blind full
+database restore. Reindexing with mock is only a rollback of behavior, not acceptance.
+
+---
