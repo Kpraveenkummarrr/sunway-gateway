@@ -19,6 +19,7 @@ from __future__ import annotations
 import argparse
 import asyncio
 import json
+import math
 import sys
 import time
 from datetime import datetime, timezone
@@ -47,8 +48,8 @@ async def _load_effective_settings(base: Settings, *, env_only: bool) -> tuple[S
                 return await effective_settings(db, base)
 
         return await asyncio.wait_for(load(), timeout=3.0), "environment plus system_config database overrides"
-    except Exception as exc:  # noqa: BLE001 - report fallback without exposing connection details
-        return base, f"environment only (database override unavailable: {type(exc).__name__})"
+    except Exception as exc:
+        raise RuntimeError(f"Cannot read effective settings ({type(exc).__name__}); use --env-only explicitly for an offline test") from None
 
 
 async def _synthesize(settings: Settings, text: str) -> tuple[bytes, int]:
@@ -80,7 +81,7 @@ async def main() -> int:
     sys.stdout.reconfigure(encoding="utf-8", errors="replace")
     parser = argparse.ArgumentParser(description="Generate objective Hindi telephony voice A/B artifacts")
     parser.add_argument("--out", type=Path, default=Path("/tmp/sunway-voice-ab"))
-    parser.add_argument("--text", default=DEFAULT_TEXT, help="fixed Hindi phrase used for every variant")
+    parser.add_argument("--text", help="exact transcript of input audio, or phrase for live synthesis")
     parser.add_argument("--input-wav", type=Path, help="existing original Bhashini WAV; skips the billed API call")
     parser.add_argument("--current-speed", type=float, help="override the effective current speed for reproduction")
     parser.add_argument(
@@ -90,17 +91,20 @@ async def main() -> int:
     parser.add_argument("--env-only", action="store_true", help="do not read admin-panel overrides from PostgreSQL")
     args = parser.parse_args()
 
-    if not args.text.strip():
+    if args.text is not None and not args.text.strip():
         parser.error("--text must not be blank")
-    args.out.mkdir(parents=True, exist_ok=True)
+    if args.out.exists() and any(args.out.iterdir()):
+        parser.error("--out must be a new or empty directory; previous evidence will not be overwritten")
 
     base = Settings()
     settings, settings_source = await _load_effective_settings(base, env_only=args.env_only)
     current_speed = args.current_speed if args.current_speed is not None else settings.ai_tts_speed
-    if current_speed <= 0:
-        parser.error("--current-speed must be positive")
+    if not math.isfinite(current_speed) or not 0.8 <= current_speed <= 1.6:
+        parser.error("--current-speed must be finite and between 0.8 and 1.6")
     if args.candidate_service_id and args.input_wav:
         parser.error("--candidate-service-id cannot be combined with --input-wav")
+    args.out.mkdir(parents=True, exist_ok=True)
+    text = args.text if args.text is not None else (None if args.input_wav else DEFAULT_TEXT)
 
     safe_config = {
         "captured_at_utc": datetime.now(timezone.utc).isoformat(),
@@ -125,15 +129,16 @@ async def main() -> int:
         if settings.tts_provider.strip().lower() != "bhashini" or settings.ai_language != "hi":
             print("ERROR: live run requires TTS_PROVIDER=bhashini and AI_LANGUAGE=hi", file=sys.stderr)
             return 2
-        source_wav, tts_ms = await _synthesize(settings, args.text)
+        source_wav, tts_ms = await _synthesize(settings, text)
         source_origin = "live Bhashini response"
 
-    word_count = len(args.text.split())
+    word_count = len(text.split()) if text else 0
     variants = build_voice_ab_variants(source_wav, current_speed=current_speed, candidate_speed=1.0)
     report = {
         "configuration": safe_config,
         "source_origin": source_origin,
-        "text": args.text,
+        "text": text,
+        "input_provider_verified": args.input_wav is None,
         "word_count": word_count,
         "tts_generation_ms": tts_ms,
         "files": _write_files(args.out, variants, word_count=word_count),
@@ -146,7 +151,7 @@ async def main() -> int:
 
     if args.candidate_service_id:
         candidate_settings = settings.model_copy(update={"bhashini_tts_service_id": args.candidate_service_id})
-        candidate_source, candidate_tts_ms = await _synthesize(candidate_settings, args.text)
+        candidate_source, candidate_tts_ms = await _synthesize(candidate_settings, text)
         candidate_native = prepare_tts_for_playback(candidate_source, speed=1.0)
         candidate_files = {
             "M1_candidate_model_original.wav": candidate_source,
@@ -168,7 +173,8 @@ async def main() -> int:
     current = report["files"]["B1_current_8k.wav"]
     candidate = report["files"]["B2_candidate_native_cadence_8k.wav"]
     print(
-        f"Bhashini service={settings.bhashini_tts_service_id} gender={settings.bhashini_tts_gender} "
+        f"Configured Bhashini service={settings.bhashini_tts_service_id} gender={settings.bhashini_tts_gender} "
+        f"input_origin={source_origin}; "
         f"source={source['sample_rate_hz']}Hz/{source['duration_seconds']:.2f}s tts={tts_ms}ms"
     )
     print(

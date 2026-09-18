@@ -11,7 +11,10 @@ import audioop
 import hashlib
 import io
 import wave
+import math
 from dataclasses import asdict
+
+import numpy as np
 
 from app.services.audio import (
     ASTERISK_SAMPLE_RATE,
@@ -20,16 +23,17 @@ from app.services.audio import (
     normalize_for_asterisk_playback,
     prepare_tts_for_playback,
     read_wav_info,
+    _read_pcm,
 )
 
 SUPPORTED_G711_CODECS = ("ulaw", "alaw")
 
 
-def describe_wav(wav_bytes: bytes, *, word_count: int = 0) -> dict[str, int | float | str]:
+def describe_wav(wav_bytes: bytes, *, word_count: int = 0) -> dict[str, int | float | str | None]:
     """Return safe, objective WAV measurements suitable for a JSON report."""
     info = read_wav_info(wav_bytes)
     levels = measure_levels(wav_bytes)
-    report: dict[str, int | float | str] = {
+    report: dict[str, int | float | str | None] = {
         "sha256": hashlib.sha256(wav_bytes).hexdigest(),
         "sample_rate_hz": info.sample_rate,
         "channels": info.channels,
@@ -39,6 +43,30 @@ def describe_wav(wav_bytes: bytes, *, word_count: int = 0) -> dict[str, int | fl
     }
     if word_count > 0 and info.duration_seconds > 0:
         report["words_per_minute"] = word_count / info.duration_seconds * 60.0
+    samples, rate = _read_pcm(wav_bytes)
+    frame = max(1, int(0.04 * rate))
+    centroids, pitches = [], []
+    for offset in range(0, max(0, len(samples) - frame + 1), frame):
+        chunk = samples[offset:offset + frame]
+        chunk = chunk - chunk.mean()
+        if np.sqrt(np.mean(chunk ** 2)) < 0.003:
+            continue
+        spectrum = np.abs(np.fft.rfft(chunk * np.hanning(frame)))
+        frequencies = np.fft.rfftfreq(frame, 1 / rate)
+        if spectrum.sum() > 0:
+            centroids.append(float(np.dot(frequencies, spectrum) / spectrum.sum()))
+        # FFT autocorrelation: diagnostic F0 estimate, not a naturalness score.
+        fft = np.fft.rfft(chunk, n=2 * frame)
+        correlation = np.fft.irfft(fft * fft.conj())[:frame]
+        lo, hi = max(1, int(rate / 400)), min(frame, int(rate / 70))
+        if hi > lo and correlation[0] > 0:
+            lag = lo + int(np.argmax(correlation[lo:hi]))
+            if correlation[lag] / correlation[0] >= 0.6:
+                pitches.append(rate / lag)
+    report["spectral_centroid_hz"] = float(np.median(centroids)) if centroids else None
+    report["estimated_f0_hz"] = float(np.median(pitches)) if pitches else None
+    report["f0_voiced_frames"] = len(pitches)
+    report["noise_floor_method"] = "10th percentile frame RMS; not isolated background noise"
     return report
 
 
@@ -83,8 +111,8 @@ def build_voice_ab_variants(
     only difference between ``current`` and ``candidate`` is local tempo, so
     a listener can attribute a preference without model/output randomness.
     """
-    if current_speed <= 0 or candidate_speed <= 0:
-        raise ValueError("speeds must be positive")
+    if not all(math.isfinite(s) and 0.8 <= s <= 1.6 for s in (current_speed, candidate_speed)):
+        raise ValueError("speeds must be finite and between 0.8 and 1.6")
 
     resampled = normalize_for_asterisk_playback(source_wav)
     current = prepare_tts_for_playback(source_wav, speed=current_speed)
@@ -94,6 +122,8 @@ def build_voice_ab_variants(
         "B0_resample_only_8k.wav": resampled,
         "B1_current_8k.wav": current,
         "B2_candidate_native_cadence_8k.wav": candidate,
+        "B3_tempo_1_10_8k.wav": prepare_tts_for_playback(source_wav, speed=1.10),
+        "B4_tempo_1_15_8k.wav": prepare_tts_for_playback(source_wav, speed=1.15),
         "C1_current_ulaw_preview.wav": g711_roundtrip(current, codec="ulaw"),
         "C2_candidate_ulaw_preview.wav": g711_roundtrip(candidate, codec="ulaw"),
         "C3_current_alaw_preview.wav": g711_roundtrip(current, codec="alaw"),
