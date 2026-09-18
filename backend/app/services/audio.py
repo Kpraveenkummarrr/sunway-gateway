@@ -207,7 +207,7 @@ def trim_silence(
 def time_stretch(samples: np.ndarray, rate: int, speed: float) -> np.ndarray:
     """Pitch-preserving tempo change (WSOLA): `speed` 1.15 plays 15% faster
     at the same pitch. Output duration is len(samples) / speed."""
-    if speed <= 0:
+    if not math.isfinite(speed) or speed <= 0:
         raise ValueError("speed must be positive")
     frame = int(0.030 * rate) & ~1
     if abs(speed - 1.0) < 0.01 or len(samples) < 3 * frame:

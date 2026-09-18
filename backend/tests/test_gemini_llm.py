@@ -9,6 +9,8 @@ import json
 
 import httpx
 import pytest
+
+from tests.test_lsd_knowledge_retrieval import lsd_corpus  # noqa: F401 - shared real-DB fixture
 from sqlalchemy import delete
 
 from app.core.config import LANGUAGE_POLICIES, Settings
@@ -28,6 +30,39 @@ from tests.fake_openai import FakeAPIError, FakeChatCompletions, FakeOpenAIClien
 FAKE_GEMINI_KEY = "fake-gemini-key-NEVER-PRINT-0123456789"
 GEMINI_URL = "https://generativelanguage.googleapis.com/v1beta/openai/"
 HINDI_REPLY = "लम्पी रोग में पशु को तेज बुखार और त्वचा पर गांठें हो सकती हैं।"
+
+
+@pytest.mark.asyncio
+async def test_runtime_token_limit_is_applied_without_mutating_other_calls():
+    provider = get_llm_provider(_settings())
+    provider._client = FakeOpenAIClient(completions=FakeChatCompletions(result_text=HINDI_REPLY))
+    await provider.for_max_tokens(96).generate_response(system_prompt="test", history=_history(), retrieved_context="test")
+    assert provider._client.chat.completions.calls[-1]["max_tokens"] == 96
+    assert provider._max_tokens == 400
+
+
+@pytest.mark.asyncio
+async def test_real_helpline_does_not_call_model_when_retrieval_is_empty(db_session, monkeypatch):
+    import app.services.conversation as conversation
+
+    async def empty_search(*args, timings=None, **kwargs):
+        timings["rag"] = 0
+        return []
+
+    monkeypatch.setattr(conversation, "search_chunks", empty_search)
+    provider = get_llm_provider(_settings())
+    provider._client = FakeOpenAIClient(completions=FakeChatCompletions(result_text="must never be spoken"))
+    session = await create_session(db_session, language="hi")
+    try:
+        result = await handle_text_turn(db_session, session, "इसका इलाज क्या है?", settings=_settings(),
+            embedding_provider=MockEmbeddingProvider(dimensions=1536), llm_provider=provider)
+        assert result.finish_reason == "grounding_unavailable"
+        assert provider._client.chat.completions.calls == []
+        assert "पशु चिकित्सक" in result.assistant_message.text
+    finally:
+        await db_session.execute(delete(AIMessage).where(AIMessage.session_id == session.id))
+        await db_session.delete(session)
+        await db_session.commit()
 
 
 def _settings(**overrides) -> Settings:
@@ -155,7 +190,7 @@ async def test_gemini_timeout_is_labelled() -> None:
 
 
 @pytest.mark.asyncio
-async def test_full_hindi_chain_asr_rag_gemini_tts(db_session) -> None:
+async def test_full_hindi_chain_asr_rag_gemini_tts(db_session, lsd_corpus) -> None:
     heard = "पशुओं में लम्पी रोग के लक्षण क्या हैं?"
 
     def bhashini(request: httpx.Request) -> httpx.Response:

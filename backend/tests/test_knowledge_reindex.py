@@ -44,6 +44,38 @@ class _OtherModel(MockEmbeddingProvider):
         return "other-model:1536"
 
 
+@pytest.mark.asyncio
+async def test_unknown_embedding_provenance_requires_reindex(document, db_session):
+    doc, provider = document
+    doc.metadata_json = {}
+    await db_session.commit()
+    status = await index_status(db_session, embedding_provider=provider)
+    row = next(d for d in status.documents if d.document_id == str(doc.id))
+    assert row.stale
+    assert not await _find(db_session, provider, doc.id)
+    await reindex_document(db_session, doc, embedding_provider=provider)
+    assert await _find(db_session, provider, doc.id)
+
+
+@pytest.mark.asyncio
+async def test_invalid_later_vector_never_commits_partial_replacement(document, db_session):
+    doc, provider = document
+    first = await _first_chunk(db_session, doc)
+    before = list(first.embedding)
+    db_session.add(KnowledgeChunk(document_id=doc.id, chunk_index=99,
+                                 chunk_text="second chunk", embedding=before))
+    await db_session.commit()
+
+    class BrokenBatch(MockEmbeddingProvider):
+        async def embed(self, texts):
+            return [[0.25] * 1536, [0.5]]
+
+    with pytest.raises(ReindexError):
+        await reindex_document(db_session, doc, embedding_provider=BrokenBatch(dimensions=1536))
+    await db_session.refresh(first)
+    assert list(first.embedding) == before
+
+
 @pytest.fixture
 async def document(db_session):
     provider = MockEmbeddingProvider(dimensions=1536)

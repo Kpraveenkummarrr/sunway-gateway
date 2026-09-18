@@ -30,6 +30,10 @@ class LLMProvider(ABC):
         provider that doesn't override this still logs something useful."""
         return type(self).__name__
 
+    def for_max_tokens(self, max_tokens: int) -> "LLMProvider":
+        """Immutable per-turn configuration view; mocks need no token limit."""
+        return self
+
     @abstractmethod
     async def generate_response(
         self,

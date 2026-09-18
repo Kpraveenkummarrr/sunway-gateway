@@ -7,6 +7,7 @@ project dependency) and `websockets` for the event stream.
 """
 
 import json
+import uuid
 from collections.abc import AsyncIterator
 from typing import Any
 
@@ -63,8 +64,14 @@ class AriClient:
             # our purposes, the channel is gone either way.
             pass
 
-    async def play(self, channel_id: str, *, media: str) -> dict:
-        response = await self._request("POST", f"/channels/{channel_id}/play", params={"media": media})
+    def new_playback_id(self) -> str:
+        return str(uuid.uuid4())
+
+    async def play(self, channel_id: str, *, media: str, playback_id: str | None = None) -> dict:
+        params = {"media": media}
+        if playback_id is not None:
+            params["playbackId"] = playback_id
+        response = await self._request("POST", f"/channels/{channel_id}/play", params=params)
         return response.json()
 
     async def stop_playback(self, playback_id: str) -> None:

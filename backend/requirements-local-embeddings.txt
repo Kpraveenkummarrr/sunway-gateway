@@ -1,0 +1,3 @@
+# Optional CPU-only candidate. Install in a staging venv; not on the live
+# worker until memory + Hindi retrieval benchmarks pass.
+fastembed==0.7.3

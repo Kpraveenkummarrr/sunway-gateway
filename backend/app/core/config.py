@@ -220,6 +220,9 @@ class Settings(BaseSettings):
     rag_embedding_api_key: str = ""
     rag_embedding_model: str = ""
     rag_embedding_dimensions: int = 1536  # must match knowledge_chunks.embedding column
+    rag_local_model_path: str = ""
+    rag_local_model_sha256: str = ""
+    rag_local_threads: int = 2
     rag_top_k: int = 4
     rag_similarity_threshold: float = 0.75
     rag_chunk_size: int = 800
@@ -239,9 +242,9 @@ class Settings(BaseSettings):
 
     @property
     def session_signing_key(self) -> str:
-        """Key for signing admin session cookies. Falls back to the internal
-        API key so sessions are still signed if APP_SECRET_KEY is unset."""
-        return self.app_secret_key or self.internal_api_key or "sunway-dev-unsigned"
+        """Private cookie signing material; prefer an independent APP_SECRET_KEY.
+        Password-only installations must not fall back to a public constant."""
+        return self.app_secret_key or self.internal_api_key or self.admin_password
 
     def caller_message(self, kind: str) -> str:
         """`kind` is "welcome", "error", or "goodbye"."""

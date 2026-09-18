@@ -3,6 +3,7 @@
 real Asterisk/ARI connection. Every call is recorded for assertions."""
 
 import asyncio
+from pathlib import Path
 from typing import Callable
 
 
@@ -10,6 +11,7 @@ class FakeAriClient:
     def __init__(self, *, on_play_started: Callable[[str], None] | None = None) -> None:
         self.answered: list[str] = []
         self.played: list[tuple[str, str]] = []
+        self.played_audio: dict[str, bytes] = {}
         self.recorded: list[tuple[str, str]] = []
         self.record_params: list[dict] = []
         self.hungup: list[str] = []
@@ -67,10 +69,17 @@ class FakeAriClient:
         self.hungup.append(channel_id)
         self.gone.add(channel_id)
 
-    async def play(self, channel_id: str, *, media: str) -> dict:
+    def new_playback_id(self) -> str:
+        return f"playback-{len(self.played) + 1}"
+
+    async def play(self, channel_id: str, *, media: str, playback_id: str | None = None) -> dict:
         self._reject_if_gone("play", channel_id)
         self.played.append((channel_id, media))
-        playback_id = f"playback-{len(self.played)}"
+        if media.startswith("sound:"):
+            path = Path(media.removeprefix("sound:") + ".wav")
+            if path.is_file():
+                self.played_audio[media] = path.read_bytes()
+        playback_id = playback_id or f"playback-{len(self.played)}"
         if self.on_play_started is not None:
             asyncio.create_task(self._signal_playback_finished(playback_id))
         return {"id": playback_id}

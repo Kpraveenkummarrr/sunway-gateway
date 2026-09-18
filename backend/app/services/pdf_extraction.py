@@ -46,6 +46,7 @@ _BLANK_LINES_RE = re.compile(r"\n{3,}")
 def normalize_text(text: str) -> str:
     """Collapse runs of horizontal whitespace and excessive blank lines
     without destroying paragraph structure (single/double newlines kept)."""
+    text = text.replace("\x00", "")  # PostgreSQL text cannot store NUL.
     text = _WHITESPACE_RE.sub(" ", text)
     text = _BLANK_LINES_RE.sub("\n\n", text)
     lines = [line.strip() for line in text.split("\n")]

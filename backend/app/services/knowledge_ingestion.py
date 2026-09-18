@@ -1,6 +1,7 @@
 """PDF -> extract -> chunk -> embed -> pgvector ingestion pipeline."""
 
 import hashlib
+import math
 import uuid
 from pathlib import Path
 
@@ -92,17 +93,14 @@ async def ingest_pdf(
         await db.refresh(document)
         return document
 
-    for chunk, vector in zip(chunks, vectors, strict=True):
-        if len(vector) != EMBEDDING_DIM:
-            document.status = "failed"
-            document.metadata_json = {
-                **(document.metadata_json or {}),
-                "error": f"Embedding provider returned {len(vector)}-dim vector, expected {EMBEDDING_DIM}",
-            }
-            await db.commit()
-            await db.refresh(document)
-            return document
+    if len(vectors) != len(chunks) or any(len(v) != EMBEDDING_DIM or not all(math.isfinite(x) for x in v) for v in vectors):
+        document.status = "failed"
+        document.metadata_json = {**(document.metadata_json or {}), "error": "Embedding count, dimension or finite-value validation failed"}
+        await db.commit()
+        await db.refresh(document)
+        return document
 
+    for chunk, vector in zip(chunks, vectors, strict=True):
         db.add(
             KnowledgeChunk(
                 document_id=document.id,

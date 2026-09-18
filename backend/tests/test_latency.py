@@ -107,9 +107,9 @@ async def test_the_caller_hears_audio_before_the_whole_reply_is_synthesized(
     play_times: list[float] = []
     original_play = ari.play
 
-    async def timed_play(channel_id, *, media):
+    async def timed_play(channel_id, *, media, playback_id=None):
         play_times.append(time.monotonic())
-        return await original_play(channel_id, media=media)
+        return await original_play(channel_id, media=media, playback_id=playback_id)
 
     ari.play = timed_play
     try:
@@ -146,9 +146,9 @@ async def test_the_next_chunk_is_synthesized_while_the_previous_one_plays(
     play_times: list[float] = []
     original_play = ari.play
 
-    async def timed_play(channel_id, *, media):
+    async def timed_play(channel_id, *, media, playback_id=None):
         play_times.append(time.monotonic())
-        return await original_play(channel_id, media=media)
+        return await original_play(channel_id, media=media, playback_id=playback_id)
 
     ari.play = timed_play
     try:
@@ -183,12 +183,15 @@ async def test_a_second_call_waits_on_no_tts_for_the_welcome(tmp_path, logged_er
         await controller.dispatch_event(stasis_start_event(first))
         after_first = len(tts.texts)
 
-        started = time.monotonic()
+        async def unexpected_synthesis(*args, **kwargs):
+            pytest.fail("cached welcome must not wait on another TTS request")
+
+        tts.synthesize = unexpected_synthesis
         await controller.dispatch_event(stasis_start_event(second))
-        elapsed = time.monotonic() - started
 
         assert len(tts.texts) == after_first
-        assert elapsed < SECONDS_PER_CHAR * len(tts.texts[0])
+        # End-to-end startup includes real database I/O. Its wall clock is
+        # not a reliable test of whether the welcome cache avoided TTS.
         assert logged_errors == []
     finally:
         await controller.dispatch_event(hangup_event(first))

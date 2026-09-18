@@ -8,6 +8,7 @@ imported lazily so the rest of the app works without it installed.
 """
 
 import asyncio
+import copy
 
 from app.providers.llm.base import LLMMessage, LLMProvider, LLMProviderError, LLMResponse
 from app.providers.llm.prompt_context import augment_system_prompt_with_context
@@ -55,6 +56,14 @@ class OpenAILLMProvider(LLMProvider):
                 ) from exc
             self._client = AsyncOpenAI(api_key=self._api_key, base_url=self._base_url)
         return self._client
+
+    def for_max_tokens(self, max_tokens: int) -> "OpenAILLMProvider":
+        if max_tokens == self._max_tokens:
+            return self
+        view = copy.copy(self)
+        view._max_tokens = max_tokens
+        view._client = self._get_client()
+        return view
 
     async def generate_response(
         self,

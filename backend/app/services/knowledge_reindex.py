@@ -15,6 +15,7 @@ is only re-read when a document has no chunks at all (a failed ingest).
 from __future__ import annotations
 
 from dataclasses import dataclass, field
+import math
 from datetime import datetime
 from pathlib import Path
 
@@ -91,10 +92,8 @@ def _classify(
     if embedded_count < chunk_count:
         return True, f"{chunk_count - embedded_count} of {chunk_count} chunks have no embedding"
     if space is None:
-        # Ingested before embedding-space metadata existed. Search still
-        # includes it for backwards compatibility, so it is reported but not
-        # treated as broken.
-        return False, "indexed before embedding-space metadata (searchable, re-index to confirm)"
+        # Unknown provenance must not be treated as a compatible vector space.
+        return True, "unknown embedding space; re-index required"
     if space != current_space:
         return True, f"indexed with {space}, queries use {current_space}"
     return False, "up to date"
@@ -209,12 +208,16 @@ async def reindex_document(
             f"Embedding provider returned {len(vectors)} vectors for {len(chunks)} chunks"
         )
 
-    for chunk, vector in zip(chunks, vectors, strict=True):
-        if len(vector) != EMBEDDING_DIM:
+    # Validate the whole batch before mutating any stored vector. Otherwise
+    # a later invalid vector can commit an earlier replacement on failure.
+    for vector in vectors:
+        if len(vector) != EMBEDDING_DIM or not all(math.isfinite(x) for x in vector):
             await _mark_failed(
                 db, document, f"Embedding provider returned a {len(vector)}-dim vector"
             )
             raise ReindexError(f"Embedding provider returned a {len(vector)}-dim vector")
+
+    for chunk, vector in zip(chunks, vectors, strict=True):
         chunk.embedding = vector
 
     document.status = "ready"

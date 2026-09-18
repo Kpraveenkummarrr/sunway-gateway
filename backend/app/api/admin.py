@@ -75,7 +75,7 @@ async def session_state(request: Request, settings: Settings = Depends(get_setti
 
     return {
         "authenticated": session_is_valid(request.cookies.get(SESSION_COOKIE), settings)
-        or not (settings.admin_password or settings.internal_api_key),
+        or (settings.app_env.lower() in ("development", "test") and not (settings.admin_password or settings.internal_api_key)),
         "password_login_enabled": bool(settings.admin_password),
     }
 

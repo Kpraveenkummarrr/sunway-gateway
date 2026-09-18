@@ -193,7 +193,7 @@ async def test_welcome_plays_normally_while_channel_is_active(tmp_path, logged_e
 
         assert ari.answered == [channel]
         assert len(ari.played) == 1 and ari.played[0][0] == channel
-        info = read_wav_info(_played_file(ari.played[0][1]).read_bytes())
+        info = read_wav_info(ari.played_audio[ari.played[0][1]])
         assert (info.sample_rate, info.channels, info.sample_width) == (8000, 1, 2)
         assert len(ari.recorded) == 1  # conversation loop started after the welcome
         assert ari.rejected == []
@@ -221,7 +221,7 @@ async def test_reply_tts_plays_normally_and_next_turn_starts(tmp_path, logged_er
         assert tts.completed == 1 + reply_chunks  # welcome + one synthesis per reply chunk
         assert len(ari.played) == 1 + reply_chunks
         for _, media in ari.played[1:]:
-            info = read_wav_info(_played_file(media).read_bytes())
+            info = read_wav_info(ari.played_audio[media])
             assert (info.sample_rate, info.channels, info.sample_width) == (8000, 1, 2)
         assert len(ari.recorded) == 2  # next turn's recording
         assert ari.rejected == []
@@ -254,7 +254,7 @@ async def test_hangup_during_welcome_tts_never_calls_play(tmp_path, logged_error
 
         assert tts.completed == 0  # still rendering when the call task finished
         tts.release.set()
-        welcome = controller._phrase_clips[controller._settings.caller_message("welcome")]
+        welcome = controller._phrase_clip(controller._settings.caller_message("welcome"))
         await asyncio.wait_for(asyncio.shield(welcome), WAIT)
         assert tts.cancelled == 0 and tts.completed == 1  # rendered and cached for the next call
 

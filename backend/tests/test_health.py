@@ -71,5 +71,26 @@ async def test_ready_degraded_when_pgvector_missing() -> None:
         app.dependency_overrides.pop(get_db, None)
 
     body = response.json()
+    assert response.status_code == 503
     assert body["status"] == "degraded"
     assert body["checks"]["pgvector"]["ok"] is False
+
+
+@pytest.mark.asyncio
+async def test_ready_failure_does_not_expose_database_credentials() -> None:
+    class UnavailableSession:
+        async def execute(self, statement):
+            raise RuntimeError("postgresql://user:private-password@host/db")
+
+    async def unavailable_db():
+        yield UnavailableSession()
+
+    app.dependency_overrides[get_db] = unavailable_db
+    try:
+        async with httpx.AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
+            response = await client.get("/ready")
+    finally:
+        app.dependency_overrides.pop(get_db, None)
+    assert response.status_code == 503
+    assert response.json()["checks"]["database"]["ok"] is False
+    assert "private-password" not in response.text

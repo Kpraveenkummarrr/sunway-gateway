@@ -24,7 +24,7 @@ from app.core.config import Settings
 from app.core.logging import get_logger
 from app.models.ai import AIMessage, AISession
 from app.providers.embeddings.base import EmbeddingProvider
-from app.providers.llm.base import LLMMessage, LLMProvider
+from app.providers.llm.base import LLMMessage, LLMProvider, LLMResponse
 from app.providers.stt.base import STTProvider
 from app.providers.tts.base import SynthesisResult, TTSProvider
 from app.services.knowledge_search import (
@@ -133,6 +133,8 @@ async def handle_text_turn(
     settings: Settings,
     embedding_provider: EmbeddingProvider,
     llm_provider: LLMProvider,
+    trace_call_id: str | None = None,
+    trace_turn_id: str | None = None,
 ) -> TurnResult:
     """Runs one text-in/text-out conversation turn: store the user
     message, retrieve relevant knowledge, generate a reply, store it.
@@ -154,6 +156,10 @@ async def handle_text_turn(
 
     timings: dict[str, int] = {}
 
+    def log_stage(stage: str, duration_ms: int) -> None:
+        logger.info("Stage call_id=%s turn_id=%s stage=%s duration_ms=%d",
+                    trace_call_id or session.call_id or session.id, trace_turn_id or user_message.id, stage, duration_ms)
+
     async def _pipeline() -> tuple[list[SearchResult], object, int]:
         # Fetched before retrieval, not just for the LLM: a short follow-up
         # needs the previous caller utterance to be searchable at all.
@@ -170,6 +176,7 @@ async def handle_text_turn(
         # dictionary while exposing the clearer public name.
         timings["embed"] = timings["embedding"]
         logger.info("embedding stage: %dms", timings["embedding"])
+        log_stage("embedding", timings["embedding"])
 
         try:
             retrieved = await asyncio.wait_for(
@@ -187,6 +194,7 @@ async def handle_text_turn(
         except asyncio.TimeoutError as exc:
             raise SearchError(f"RAG search timed out after {settings.provider_timeout_seconds}s") from exc
         logger.info("rag stage: %dms, %d chunks", timings["rag"], len(retrieved))
+        log_stage("retrieval", timings["rag"])
 
         # For an LLM-provider A/B comparison to be valid, both providers must
         # be shown this is the exact same retrieval for the exact same turn —
@@ -212,17 +220,28 @@ async def handle_text_turn(
         llm_history = _history_to_llm_messages(history, max_messages=settings.ai_max_history_messages)
 
         llm_started = time.monotonic()
-        llm_response = await llm_provider.generate_response(
-            system_prompt=settings.system_prompt_for(
-                session.language, caller_text=user_text
-            ),
-            history=llm_history,
-            retrieved_context=context,
-        )
+        if (not context and settings.llm_provider.strip().lower() != "mock"
+                and settings.ai_persona == "lsd_helpline"):
+            # No context is not permission to answer veterinary questions
+            # from model memory. A deterministic fallback cannot invent doses.
+            llm_response = LLMResponse(text=(
+                "क्षमा करें, अभी इस सवाल की भरोसेमंद जानकारी उपलब्ध नहीं है। कृपया पशु चिकित्सक से सलाह लें।"
+                if session.language == "hi" else
+                "Sorry, verified information for that question is unavailable. Please consult a veterinarian."
+            ), finish_reason="grounding_unavailable")
+        else:
+            llm_response = await llm_provider.for_max_tokens(settings.llm_max_tokens).generate_response(
+                system_prompt=settings.system_prompt_for(
+                    session.language, caller_text=user_text
+                ),
+                history=llm_history,
+                retrieved_context=context,
+            )
         llm_latency_ms = int((time.monotonic() - llm_started) * 1000)
         timings["llm"] = llm_latency_ms
         timings["llm_ms"] = llm_latency_ms
         logger.info("llm stage: %dms", llm_latency_ms)
+        log_stage("llm_complete", llm_latency_ms)
 
         return retrieved, llm_response, llm_latency_ms
 

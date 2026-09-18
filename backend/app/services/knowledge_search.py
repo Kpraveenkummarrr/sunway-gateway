@@ -96,7 +96,12 @@ def build_retrieval_query(user_text: str, previous_user_texts: list[str] | None 
         return text
     if len(lexical_terms(text)) > FOLLOW_UP_MAX_TERMS:
         return text
-    for previous in reversed(previous_user_texts or []):
+    previous_texts = [p.strip() for p in (previous_user_texts or []) if p.strip() and p.strip() != text]
+    # Preserve the explicit topic across several pronoun/acknowledgement turns.
+    for previous in reversed(previous_texts):
+        if len(lexical_terms(previous)) > FOLLOW_UP_MAX_TERMS:
+            return f"{previous} {text}"
+    for previous in reversed(previous_texts):
         previous = (previous or "").strip()
         if previous and previous != text:
             return f"{previous} {text}"
@@ -149,9 +154,8 @@ async def search_chunks(
 ) -> list[SearchResult]:
     """Return top-K hybrid-ranked chunks from ready documents.
 
-    Documents created before embedding-space metadata existed are retained
-    for backwards compatibility. Documents with an explicit different space
-    are excluded, preventing known model mixing until they are re-indexed.
+    With an explicit query space, unknown and incompatible provenance is
+    excluded until re-indexed. Equal dimensions do not make models compatible.
     """
     if len(query_embedding) != EMBEDDING_DIM:
         raise SearchError(
@@ -175,11 +179,9 @@ async def search_chunks(
         KnowledgeChunk.embedding.is_not(None),
     ]
     if embedding_space is not None:
-        # Old documents without metadata remain searchable; a document that
-        # explicitly names another model/dimension is not mixed into this
-        # query and must be re-indexed with the current provider.
+        # Unknown provenance cannot safely participate in semantic ranking.
         stored_space = KnowledgeDocument.metadata_json["embedding_space"].astext
-        filters.append(or_(stored_space.is_(None), stored_space == embedding_space))
+        filters.append(stored_space == embedding_space)
 
     def _base_stmt():
         return (

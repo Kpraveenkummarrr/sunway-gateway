@@ -11,6 +11,7 @@ effect on the next call without a restart.
 """
 
 from dataclasses import dataclass
+import math
 from typing import Any
 
 from sqlalchemy import select
@@ -70,6 +71,8 @@ def coerce(key: str, raw: Any) -> Any:
     except (TypeError, ValueError) as exc:
         raise ConfigError(f"{key} must be {spec.kind.__name__}") from exc
 
+    if isinstance(value, float) and not math.isfinite(value):
+        raise ConfigError(f"{key} must be finite")
     if spec.choices and value not in spec.choices:
         raise ConfigError(f"{key} must be one of {spec.choices}")
     if spec.minimum is not None and value < spec.minimum:

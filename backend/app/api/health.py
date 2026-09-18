@@ -1,4 +1,4 @@
-from fastapi import APIRouter, Depends
+from fastapi import APIRouter, Depends, Response
 from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -16,7 +16,7 @@ async def health() -> dict:
 
 
 @router.get("/ready")
-async def ready(db: AsyncSession = Depends(get_db)) -> dict:
+async def ready(response: Response, db: AsyncSession = Depends(get_db)) -> dict:
     """Readiness check — verifies the database is reachable and the
     pgvector extension is installed.
 
@@ -30,8 +30,8 @@ async def ready(db: AsyncSession = Depends(get_db)) -> dict:
         await db.execute(text("SELECT 1"))
         checks["database"] = {"ok": True}
     except Exception as exc:  # noqa: BLE001 - readiness probe must not crash
-        logger.error("readiness db check failed: %s", exc)
-        checks["database"] = {"ok": False, "error": str(exc)}
+        logger.error("readiness db check failed: %s", type(exc).__name__)
+        checks["database"] = {"ok": False, "error": "Database unavailable"}
         overall_ok = False
 
     try:
@@ -42,8 +42,9 @@ async def ready(db: AsyncSession = Depends(get_db)) -> dict:
         checks["pgvector"] = {"ok": has_pgvector}
         overall_ok = overall_ok and has_pgvector
     except Exception as exc:  # noqa: BLE001
-        logger.error("readiness pgvector check failed: %s", exc)
-        checks["pgvector"] = {"ok": False, "error": str(exc)}
+        logger.error("readiness pgvector check failed: %s", type(exc).__name__)
+        checks["pgvector"] = {"ok": False, "error": "Extension check unavailable"}
         overall_ok = False
 
+    response.status_code = 200 if overall_ok else 503
     return {"status": "ok" if overall_ok else "degraded", "checks": checks}

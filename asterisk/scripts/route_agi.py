@@ -103,12 +103,14 @@ def request(method: str, path: str, api_url: str, api_key: str, payload: dict | 
 
 def publish_route(digit: str, api_url: str, api_key: str) -> None:
     set_variable("ROUTE_COUNT", 0)
+    set_variable("ROUTE_FOUND", 0)
     plan = request("GET", f"/api/callcentre/route/{digit}", api_url, api_key)
     if not plan:
         log(f"no routing plan for digit {digit}")
         return
 
     targets = plan.get("targets") or []
+    set_variable("ROUTE_FOUND", 1)
     for index, target in enumerate(targets, start=1):
         set_variable(f"ROUTE_{index}", target.get("number", ""))
         set_variable(f"ROUTE_LABEL_{index}", target.get("label", ""))

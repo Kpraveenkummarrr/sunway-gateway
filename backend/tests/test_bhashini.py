@@ -526,11 +526,12 @@ async def test_controller_always_plays_bhashini_48khz_audio_as_8khz_mono_pcm() -
 
         assert len(ari.played) == 1
         written = list((tmp_path / "sounds" / "ai-agent").glob("*.wav"))
-        assert len(written) == 1
+        assert len(written) == 0  # ephemeral clip is removed after completion
         # Absolute path: Asterisk resolves relative sound names against its
         # data dir, where these files don't live.
-        assert ari.played[0][1] == f"sound:{written[0].with_suffix('').as_posix()}"
-        info = read_wav_info(written[0].read_bytes())
+        media = ari.played[0][1]
+        assert Path(media.removeprefix("sound:")).is_absolute()
+        info = read_wav_info(ari.played_audio[media])
         assert (info.sample_rate, info.channels, info.sample_width) == (8000, 1, 2)
 
 

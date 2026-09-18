@@ -25,6 +25,7 @@ _BULLET = re.compile(r"^\s{0,4}[-*•·—]\s+", flags=re.MULTILINE)
 _NUMBERED = re.compile(r"^\s{0,4}(\d{1,2}|[१२३४५६७८९०]{1,2})[.)]\s+", flags=re.MULTILINE)
 _TABLE_ROW = re.compile(r"^\s*\|.*\|\s*$", flags=re.MULTILINE)
 _LINK = re.compile(r"\[([^\]]+)\]\([^)]*\)")
+_URL = re.compile(r"(?:https?://|www\.)\S+", re.IGNORECASE)
 _SENTENCE_END = "।॥?!."
 _REPEATED_PUNCT = re.compile(r"([।॥?!.,])\1{1,}")
 _SPACE_BEFORE_PUNCT = re.compile(r"\s+([।॥?!,.])")
@@ -49,6 +50,7 @@ def spoken_text(text: str) -> str:
         return ""
 
     cleaned = _LINK.sub(r"\1", text)
+    cleaned = _URL.sub("", cleaned)
     cleaned = _TABLE_ROW.sub(" ", cleaned)
     cleaned = _HEADING.sub("", cleaned)
     cleaned = _BLOCKQUOTE.sub("", cleaned)

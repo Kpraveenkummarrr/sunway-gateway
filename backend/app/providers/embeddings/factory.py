@@ -14,7 +14,13 @@ def get_embedding_provider(settings: Settings) -> EmbeddingProvider:
     provider_name = (settings.rag_embedding_provider or "").strip().lower()
 
     if provider_name == "mock":
+        if settings.app_env.lower() not in ("development", "test"):
+            raise EmbeddingProviderError("Mock embeddings are not allowed outside development/test")
         return MockEmbeddingProvider(dimensions=settings.rag_embedding_dimensions)
+
+    if provider_name == "local":
+        from app.providers.embeddings.local_provider import get_local_provider
+        return get_local_provider(settings.rag_local_model_path, settings.rag_local_model_sha256, settings.rag_local_threads)
 
     if provider_name == "openai":
         from app.providers.embeddings.openai_provider import OpenAIEmbeddingProvider
