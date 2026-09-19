@@ -46,8 +46,16 @@ EDITABLE_KEYS: dict[str, EditableSetting] = {
         EditableSetting("ai_welcome_message", str, "Welcome message"),
         EditableSetting("ai_error_message", str, "Error message"),
         EditableSetting("ai_goodbye_message", str, "Goodbye message"),
-        EditableSetting("ai_tts_speed", float, "Speech speed", minimum=0.8, maximum=1.6),
-        EditableSetting("ai_end_of_speech_silence_seconds", int, "End-of-speech silence (s)", minimum=1, maximum=10),
+        EditableSetting("ai_closing_message", str, "Closing message (call time limit reached)"),
+        # 1.0 = the samples are not touched at all; anything else runs the tempo stage.
+        EditableSetting("ai_tts_speed", float, "Speech speed (1.0 = no processing)", minimum=0.8, maximum=1.6),
+        EditableSetting("ai_audio_profile", str, "Audio processing profile", choices=("clean", "legacy")),
+        EditableSetting("ai_tts_target_rms_dbfs", float, "Speech loudness target (dBFS)", minimum=-30, maximum=-10),
+        EditableSetting("ai_tts_peak_ceiling_dbfs", float, "Peak ceiling (dBFS)", minimum=-12, maximum=-1),
+        EditableSetting("ai_call_timeout_seconds", int, "Maximum call length (s, 0 = no limit)", minimum=0, maximum=7200),
+        EditableSetting("ai_endpoint_silence_ms", int, "Caller silence that ends a turn (ms)", minimum=400, maximum=4000),
+        EditableSetting("ai_talk_detect_threshold", int, "Barge-in sensitivity (lower = more sensitive)", minimum=100, maximum=2000),
+        EditableSetting("ai_end_of_speech_silence_seconds", int, "Asterisk end-of-speech backstop (s)", minimum=1, maximum=10),
         EditableSetting("ai_max_turn_seconds", int, "Max caller turn (s)", minimum=5, maximum=60),
         EditableSetting("ai_no_input_timeout_seconds", int, "No-input hangup (s)", minimum=5, maximum=120),
         EditableSetting("ai_turn_timeout_seconds", float, "AI turn timeout (s)", minimum=5, maximum=120),
@@ -67,7 +75,17 @@ def coerce(key: str, raw: Any) -> Any:
     if spec is None:
         raise ConfigError(f"{key} is not an editable setting")
     try:
-        value = spec.kind(raw)
+        if spec.kind is bool:
+            # bool("false") is True in Python; parse the words a form can send.
+            text = str(raw).strip().lower()
+            if text in ("true", "1", "yes", "on"):
+                value = True
+            elif text in ("false", "0", "no", "off", ""):
+                value = False
+            else:
+                raise ValueError(text)
+        else:
+            value = spec.kind(raw)
     except (TypeError, ValueError) as exc:
         raise ConfigError(f"{key} must be {spec.kind.__name__}") from exc
 

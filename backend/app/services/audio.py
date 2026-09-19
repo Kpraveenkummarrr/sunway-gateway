@@ -28,6 +28,7 @@ import audioop
 import io
 import math
 import struct
+import time
 import wave
 from dataclasses import dataclass
 
@@ -301,6 +302,193 @@ def prepare_tts_for_playback(wav_bytes: bytes, *, speed: float = 1.0) -> bytes:
     return _write_pcm(samples, ASTERISK_SAMPLE_RATE)
 
 
+# ---- profile-based TTS preparation with per-clip diagnostics ----
+
+AUDIO_PROFILES = ("clean", "legacy")
+_TEMPO_BYPASS_TOLERANCE = 0.01  # |speed - 1| below this: the samples are not touched at all
+_ACTIVE_SPEECH_WINDOW_DB = 30.0  # frames within this of the loudest count as "speech" for loudness
+_CLEAN_TRIM_DB_BELOW_PEAK = 50.0
+_CLEAN_TRIM_PAD_SECONDS = 0.08
+_CLEAN_FADE_SECONDS = 0.010
+_CLEAN_MAX_BOOST_DB = 9.0
+_CLEAN_MAX_CUT_DB = 12.0
+
+
+@dataclass(frozen=True)
+class ClipDiagnostics:
+    """What was done to one synthesized clip, and what came out. Logged for
+    every clip so a bad-sounding call can be traced to a stage instead of
+    guessed at."""
+
+    profile: str
+    source_rate: int
+    source_channels: int
+    source_bits: int
+    source_duration_s: float
+    final_rate: int
+    final_duration_s: float
+    tempo: float
+    tempo_applied: bool
+    resampled: bool
+    trimmed_s: float
+    gain_db: float
+    source_peak_dbfs: float
+    source_rms_dbfs: float
+    peak_dbfs: float
+    rms_dbfs: float
+    clipped_ratio: float
+    noise_floor_dbfs: float
+    processing_ms: int
+
+    def summary(self) -> str:
+        return (
+            f"profile={self.profile} src={self.source_rate}Hz/{self.source_channels}ch/{self.source_bits}bit "
+            f"src_dur={self.source_duration_s:.2f}s -> out={self.final_rate}Hz dur={self.final_duration_s:.2f}s "
+            f"tempo={self.tempo:.2f}x tempo_applied={self.tempo_applied} resampled={self.resampled} "
+            f"trimmed={self.trimmed_s:.2f}s gain={self.gain_db:+.1f}dB "
+            f"src_peak={self.source_peak_dbfs:.1f}dBFS src_rms={self.source_rms_dbfs:.1f}dBFS "
+            f"peak={self.peak_dbfs:.1f}dBFS rms={self.rms_dbfs:.1f}dBFS clipped={self.clipped_ratio:.4f} "
+            f"noise_floor={self.noise_floor_dbfs:.1f}dBFS prep={self.processing_ms}ms"
+        )
+
+
+@dataclass(frozen=True)
+class PreparedClip:
+    audio: bytes
+    diagnostics: ClipDiagnostics
+
+
+def _fade_edges_cosine(samples: np.ndarray, rate: int, seconds: float) -> np.ndarray:
+    n = min(int(seconds * rate), len(samples) // 2)
+    if n <= 0:
+        return samples
+    samples = samples.copy()
+    ramp = 0.5 - 0.5 * np.cos(np.linspace(0.0, np.pi, n))
+    samples[:n] *= ramp
+    samples[-n:] *= ramp[::-1]
+    return samples
+
+
+def _active_speech_rms(samples: np.ndarray, rate: int) -> float:
+    """RMS of the speech itself, ignoring pauses: a clip that is half silence
+    must not be judged quiet - or boosted into the noise floor - because of it."""
+    rms, frame = _frame_rms(samples, rate)
+    if len(rms) == 0 or rms.max() <= 0:
+        return 0.0
+    active = rms >= rms.max() * 10 ** (-_ACTIVE_SPEECH_WINDOW_DB / 20)
+    frames = samples[: len(rms) * frame].reshape(len(rms), frame)[active]
+    return float(np.sqrt(np.mean(frames**2))) if frames.size else 0.0
+
+
+def prepare_tts_clip(
+    wav_bytes: bytes,
+    *,
+    speed: float = 1.0,
+    profile: str = "clean",
+    target_rms_dbfs: float = -18.0,
+    peak_ceiling_dbfs: float = -3.0,
+) -> PreparedClip:
+    """TTS output -> 8 kHz mono 16-bit PCM for Asterisk, plus diagnostics.
+
+    "clean" (production default) does the least that is needed:
+      * ONE band-limited resample, and none at all if the source is already 8 kHz;
+      * NO tempo processing unless `speed` differs from 1.0 - at 1.0 the samples
+        are not touched by any time-stretch code;
+      * gentle trim (silence 50 dB below peak, 80 ms kept each side) so soft
+        consonant tails are not cut;
+      * level matched by the loudness of the speech (not by its highest
+        peak), so consecutive chunks of one reply sound equally loud, with a
+        hard peak ceiling so nothing can clip;
+      * 10 ms raised-cosine edges.
+    "legacy" reproduces the previous chain exactly (for A/B comparison).
+    Raises AudioFormatError for effectively silent audio.
+    """
+    if profile not in AUDIO_PROFILES:
+        raise ValueError(f"audio profile must be one of {AUDIO_PROFILES}")
+    started = time.perf_counter()
+    source, source_rate = _read_pcm(wav_bytes)
+    source_info = read_wav_info(wav_bytes)
+    source_levels = levels_of(source, source_rate)
+
+    if profile == "legacy":
+        audio = prepare_tts_for_playback(wav_bytes, speed=speed)
+        out, out_rate = _read_pcm(audio)
+        tempo_applied = abs(speed - 1.0) >= 0.01
+        trimmed = max(0.0, source_levels.duration_seconds / (speed if tempo_applied else 1.0) - len(out) / out_rate)
+        out_levels = levels_of(out, out_rate)
+        gain_db = out_levels.peak_dbfs - source_levels.peak_dbfs
+        return PreparedClip(audio, _diagnostics(
+            "legacy", source_info, source_levels, speed, tempo_applied, source_rate != ASTERISK_SAMPLE_RATE,
+            trimmed, gain_db, out, out_rate, started))
+
+    samples = resample(source, source_rate, ASTERISK_SAMPLE_RATE)
+    resampled = source_rate != ASTERISK_SAMPLE_RATE
+    if len(samples) == 0 or _dbfs(float(np.max(np.abs(samples)))) < _SILENT_PEAK_DBFS:
+        raise AudioFormatError("TTS audio is silent")
+    before_trim = len(samples)
+    samples = trim_silence(
+        samples, ASTERISK_SAMPLE_RATE, db_below_peak=_CLEAN_TRIM_DB_BELOW_PEAK, pad_seconds=_CLEAN_TRIM_PAD_SECONDS
+    )
+    trimmed = (before_trim - len(samples)) / ASTERISK_SAMPLE_RATE
+
+    tempo_applied = abs(speed - 1.0) >= _TEMPO_BYPASS_TOLERANCE
+    if tempo_applied:
+        samples = time_stretch(samples, ASTERISK_SAMPLE_RATE, speed)
+
+    speech_rms = _active_speech_rms(samples, ASTERISK_SAMPLE_RATE)
+    peak = float(np.max(np.abs(samples))) if len(samples) else 0.0
+    gain = 1.0
+    if speech_rms > 1e-6 and peak > 1e-6:
+        gain = min(
+            10 ** (target_rms_dbfs / 20) / speech_rms,
+            10 ** (peak_ceiling_dbfs / 20) / peak,
+            10 ** (_CLEAN_MAX_BOOST_DB / 20),
+        )
+        gain = max(gain, 10 ** (-_CLEAN_MAX_CUT_DB / 20))
+    samples = _fade_edges_cosine(samples * gain, ASTERISK_SAMPLE_RATE, _CLEAN_FADE_SECONDS)
+    audio = _write_pcm(samples, ASTERISK_SAMPLE_RATE)
+    return PreparedClip(audio, _diagnostics(
+        "clean", source_info, source_levels, speed, tempo_applied, resampled, trimmed,
+        20 * math.log10(gain) if gain > 0 else -120.0, samples, ASTERISK_SAMPLE_RATE, started))
+
+
+def _diagnostics(
+    profile: str,
+    source_info: WavInfo,
+    source_levels: AudioLevels,
+    speed: float,
+    tempo_applied: bool,
+    resampled: bool,
+    trimmed_s: float,
+    gain_db: float,
+    out: np.ndarray,
+    out_rate: int,
+    started: float,
+) -> ClipDiagnostics:
+    out_levels = levels_of(out, out_rate)
+    return ClipDiagnostics(
+        profile=profile,
+        source_rate=source_info.sample_rate,
+        source_channels=source_info.channels,
+        source_bits=source_info.sample_width * 8,
+        source_duration_s=source_info.duration_seconds,
+        final_rate=out_rate,
+        final_duration_s=len(out) / out_rate,
+        tempo=speed,
+        tempo_applied=tempo_applied,
+        resampled=resampled,
+        trimmed_s=trimmed_s,
+        gain_db=gain_db,
+        source_peak_dbfs=source_levels.peak_dbfs,
+        source_rms_dbfs=source_levels.rms_dbfs,
+        peak_dbfs=out_levels.peak_dbfs,
+        rms_dbfs=out_levels.rms_dbfs,
+        clipped_ratio=out_levels.clipped_ratio,
+        noise_floor_dbfs=out_levels.noise_floor_dbfs,
+        processing_ms=int((time.perf_counter() - started) * 1000),
+    )
+
+
 def resample_for_asr(wav_bytes: bytes, *, target_rate: int = ASR_SAMPLE_RATE) -> bytes:
     """PCM WAV -> mono 16-bit PCM at `target_rate` (band-limited). Returns
     the input unchanged if it's already in that format."""
@@ -328,6 +516,11 @@ def measure_levels(wav_bytes: bytes) -> AudioLevels:
     """Level diagnostics for a clip: peak/RMS/noise floor in dBFS, share of
     clipped samples, and leading/trailing silence."""
     samples, rate = _read_pcm(wav_bytes)
+    return levels_of(samples, rate)
+
+
+def levels_of(samples: np.ndarray, rate: int) -> AudioLevels:
+    """`measure_levels` for samples already in memory (float, -1..1)."""
     duration = len(samples) / rate
     if len(samples) == 0:
         return AudioLevels(0.0, -120.0, -120.0, -120.0, 0.0, 0.0, 0.0)

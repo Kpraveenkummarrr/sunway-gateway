@@ -1,0 +1,16 @@
+{
+  "_comment": "Extra retrieval synonym groups. Each inner list is a set of words a caller might use for the SAME thing; any of them then finds passages that use any other. Names only - this file never contains answers. Point RAG_SYNONYMS_PATH at your copy of this file; it is re-read when it changes. Built-in groups (Lumpy Skin Disease, symptoms, spread, prevention, vaccine, treatment, milk, meat, fever, lumps, flies, disease, skin, cow, buffalo, animal, vet) always apply.",
+  "groups": [
+    [
+      "थनैला",
+      "थन की सूजन",
+      "mastitis"
+    ],
+    [
+      "खुरपका",
+      "मुंहपका",
+      "मुँहखुर",
+      "fmd"
+    ]
+  ]
+}

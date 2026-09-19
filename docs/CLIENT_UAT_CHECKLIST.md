@@ -169,9 +169,11 @@ printf 'Private rollback directory: %s\n' "$backup_dir"
 ```
 
 The DB dump includes admin runtime settings and old embeddings. Keep the backup
-on this host under restricted permissions. Never commit it. No `.env` changes
-are necessary for the media/security fixes except configuring strong private
-admin/API keys if currently absent.
+on this host under restricted permissions. Never commit it. The 2026-09-17
+media/security fixes needed no `.env` changes beyond strong private admin/API
+keys, **but the 2026-09-19 update does**: a copied `AI_CALL_TIMEOUT_SECONDS=120`
+and `AI_TTS_SPEED=1.15` override the new defaults — see
+[the 2026-09-19 sheet](CLIENT_UAT_UPDATE_20260919.md#82-the-env-lines-that-must-change).
 Prefer a separate, high-entropy `APP_SECRET_KEY` (at least 32 random bytes),
 plus strong `ADMIN_PASSWORD` and `INTERNAL_API_KEY`, stored only in the private
 environment. Password fallback removes the public-key vulnerability but is not

@@ -18,6 +18,9 @@ class TranscriptionResult:
 class STTProvider(ABC):
     """Abstraction over speech-to-text vendors."""
 
+    async def warm_up(self) -> None:
+        """Open connections ahead of the first request. Optional; must never raise."""
+
     @abstractmethod
     async def transcribe(self, audio_bytes: bytes, *, language: str | None = None) -> TranscriptionResult:
         """Transcribes audio to text.

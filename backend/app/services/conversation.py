@@ -188,6 +188,7 @@ async def handle_text_turn(
                     similarity_threshold=settings.rag_similarity_threshold,
                     embedding_space=embedding_provider.embedding_space,
                     timings=timings,
+                    synonyms_path=settings.rag_synonyms_path or None,
                 ),
                 timeout=settings.provider_timeout_seconds,
             )

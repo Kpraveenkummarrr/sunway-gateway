@@ -23,17 +23,19 @@ from tests.fake_ari import (
 
 
 def _make_controller(tmp_path: Path, **overrides) -> AICallController:
-    settings = Settings(
-        ai_test_extension="700",
-        ai_language="en",
-        ai_call_timeout_seconds=120,
-        ai_welcome_message="Hello, please ask your question.",
-        rag_top_k=4,
-        rag_similarity_threshold=-1.0,
-        asterisk_recording_spool_path=str(tmp_path),
-        provider_timeout_seconds=2.0,  # safety net only — playback completion is signaled explicitly below
-        **overrides,
-    )
+    values = {
+        "ai_test_extension": "700",
+        "ai_language": "en",
+        "ai_call_timeout_seconds": 120,
+        "ai_welcome_message": "Hello, please ask your question.",
+        "rag_top_k": 4,
+        "rag_similarity_threshold": -1.0,
+        "asterisk_recording_spool_path": str(tmp_path),
+        "provider_timeout_seconds": 2.0,  # safety net only — completion is signaled below
+        "llm_provider": "mock",  # let tests reach their stub LLM without a grounding refusal
+    }
+    values.update(overrides)
+    settings = Settings(**values)
     ari = FakeAriClient()
     controller = AICallController(
         ari=ari,

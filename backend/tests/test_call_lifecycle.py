@@ -106,6 +106,9 @@ def _make(
         rag_similarity_threshold=-1.0,
         asterisk_recording_spool_path=str(tmp_path / "recording"),
         provider_timeout_seconds=2.0,
+        # The controller is given a stub LLM object; the *setting* must say so or
+        # the grounding fallback answers (without calling any LLM) on an empty KB.
+        llm_provider="mock",
     )
     values.update(overrides)
     settings = Settings(**values)
@@ -477,10 +480,10 @@ async def test_prewarm_renders_all_caller_phrases_before_any_call(tmp_path, logg
     channel = _channel()
     try:
         await controller.prewarm_caller_messages()
-        assert tts.calls == 3  # welcome, error, goodbye
+        assert tts.calls == 4  # welcome, error, goodbye, closing
 
         await controller.dispatch_event(stasis_start_event(channel))
-        assert tts.calls == 3  # the call's welcome came from the pre-rendered clip
+        assert tts.calls == 4  # the call's welcome came from the pre-rendered clip
         assert len(ari.played) == 1
     finally:
         await controller.dispatch_event(hangup_event(channel))

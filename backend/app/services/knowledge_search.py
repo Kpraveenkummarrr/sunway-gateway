@@ -12,11 +12,21 @@ import unicodedata
 from dataclasses import dataclass
 from uuid import UUID
 
+from pathlib import Path
+
 from sqlalchemy import func, or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.logging import get_logger
 from app.models.knowledge import EMBEDDING_DIM, KnowledgeChunk, KnowledgeDocument
+from app.services.lexical_retrieval import (
+    ChunkRecord,
+    LexicalIndex,
+    content_terms,
+    load_synonym_groups,
+    names_a_topic,
+    topic_words,
+)
 
 logger = get_logger(__name__)
 
@@ -78,10 +88,10 @@ def lexical_terms(query: str) -> list[str]:
 
 
 # A caller's follow-up ("iska ilaj kya hai?") names no topic at all, so on its
-# own it retrieves nothing. Below this many meaningful terms the previous
-# caller utterance is folded into the retrieval query to carry the topic
-# forward. The caller's own words are always kept, never replaced.
-FOLLOW_UP_MAX_TERMS = 4
+# own it retrieves nothing. A question with this many meaningful words or fewer
+# (function words like क्या/है/के do not count) that does not name the subject
+# itself is treated as a follow-up. The caller's own words are always kept.
+FOLLOW_UP_MAX_CONTENT_TERMS = 2
 
 
 def build_retrieval_query(user_text: str, previous_user_texts: list[str] | None = None) -> str:
@@ -94,17 +104,23 @@ def build_retrieval_query(user_text: str, previous_user_texts: list[str] | None 
     text = (user_text or "").strip()
     if not text:
         return text
-    if len(lexical_terms(text)) > FOLLOW_UP_MAX_TERMS:
+    if names_a_topic(text) or len(content_terms(text)) > FOLLOW_UP_MAX_CONTENT_TERMS:
         return text
     previous_texts = [p.strip() for p in (previous_user_texts or []) if p.strip() and p.strip() != text]
-    # Preserve the explicit topic across several pronoun/acknowledgement turns.
+    # Carry the SUBJECT the caller last named, not their whole earlier question:
+    # the earlier question's own angle ("लक्षण") would drag the answer to the
+    # wrong passage when they now ask about "बचाव". This holds across
+    # acknowledgements ("जी हाँ", "ठीक है") in between.
     for previous in reversed(previous_texts):
-        if len(lexical_terms(previous)) > FOLLOW_UP_MAX_TERMS:
+        subject = topic_words(previous)
+        if subject:
+            return f"{' '.join(dict.fromkeys(subject))} {text}"
+    # No known subject: fall back to the last question with content of its own.
+    for previous in reversed(previous_texts):
+        if len(content_terms(previous)) > FOLLOW_UP_MAX_CONTENT_TERMS:
             return f"{previous} {text}"
     for previous in reversed(previous_texts):
-        previous = (previous or "").strip()
-        if previous and previous != text:
-            return f"{previous} {text}"
+        return f"{previous} {text}"
     return text
 
 
@@ -131,6 +147,59 @@ class SearchError(Exception):
     pass
 
 
+# One index per process and embedding space, rebuilt only when the matching
+# corpus changes.  The row IDs are part of the signature: counts/timestamps can
+# collide when fast tests (or an operator) replace one document with another.
+_INDEX_CACHE: dict[tuple[str, str], tuple[tuple, LexicalIndex]] = {}
+
+
+async def _lexical_index(
+    db: AsyncSession, synonyms_path: str | None, embedding_space: str | None
+) -> LexicalIndex:
+    filters = [KnowledgeDocument.status == "ready"]
+    if embedding_space is not None:
+        filters.append(KnowledgeDocument.metadata_json["embedding_space"].astext == embedding_space)
+    rows = (
+        await db.execute(
+            select(
+                KnowledgeChunk.id,
+                KnowledgeChunk.document_id,
+                KnowledgeDocument.filename,
+                KnowledgeChunk.page_number,
+                KnowledgeChunk.chunk_index,
+                KnowledgeChunk.chunk_text,
+                KnowledgeChunk.updated_at,
+                KnowledgeDocument.updated_at,
+            )
+            .join(KnowledgeDocument, KnowledgeChunk.document_id == KnowledgeDocument.id)
+            .where(*filters)
+            .order_by(KnowledgeDocument.created_at, KnowledgeChunk.chunk_index)
+        )
+    ).all()
+    synonyms_stamp = None
+    if synonyms_path:
+        try:
+            synonyms_stamp = Path(synonyms_path).stat().st_mtime_ns
+        except OSError:
+            pass
+    signature = (synonyms_stamp, tuple((row[0], row[6], row[7]) for row in rows))
+    key = (synonyms_path or "", embedding_space or "")
+    cached = _INDEX_CACHE.get(key)
+    if cached is not None and cached[0] == signature:
+        return cached[1]
+    index = LexicalIndex(
+        [ChunkRecord(*row[:6]) for row in rows], synonym_groups=load_synonym_groups(synonyms_path)
+    )
+    _INDEX_CACHE[key] = (signature, index)
+    logger.info("Lexical index built: %d chunks", len(rows))
+    return index
+
+
+async def _lexical_hits(db, query_text, *, top_k, min_coverage, synonyms_path, embedding_space):
+    index = await _lexical_index(db, synonyms_path, embedding_space)
+    return index.search(query_text, top_k=top_k, min_coverage=min_coverage)
+
+
 @dataclass(frozen=True)
 class SearchResult:
     chunk_id: UUID
@@ -151,8 +220,17 @@ async def search_chunks(
     similarity_threshold: float | None = None,
     embedding_space: str | None = None,
     timings: dict[str, int] | None = None,
+    use_lexical_index: bool = True,
+    lexical_min_coverage: float = 0.34,
+    synonyms_path: str | None = None,
 ) -> list[SearchResult]:
     """Return top-K hybrid-ranked chunks from ready documents.
+
+    Two channels are merged. The vector channel (below) needs a meaningful
+    embedding space. The lexical channel (app.services.lexical_retrieval)
+    searches every ready chunk in the current embedding space, so a weak or
+    placeholder vector cannot make the knowledge base look empty without
+    admitting stale or unknown-provenance documents.
 
     With an explicit query space, unknown and incompatible provenance is
     excluded until re-indexed. Equal dimensions do not make models compatible.
@@ -238,6 +316,27 @@ async def search_chunks(
         # Lexical evidence is a tie-breaker/boost, never a replacement for
         # the vector score exposed to callers.
         ranked.append((sim + (0.15 * lexical_score), result))
+
+    if use_lexical_index and (query_text or "").strip():
+        lexical_started = time.monotonic()
+        by_chunk = {result.chunk_id: position for position, (_, result) in enumerate(ranked)}
+        for hit in await _lexical_hits(db, query_text or "", top_k=top_k, min_coverage=lexical_min_coverage,
+                                        synonyms_path=synonyms_path, embedding_space=embedding_space):
+            # In vector-similarity units: a chunk covering the whole question ~1.0.
+            score = 0.35 + 0.65 * hit.coverage
+            position = by_chunk.get(hit.record.chunk_id)
+            if position is not None:
+                # Both channels found it: the stronger score, plus a little for agreeing.
+                ranked[position] = (max(ranked[position][0], score) + 0.05, ranked[position][1])
+                continue
+            record = hit.record
+            ranked.append((score, SearchResult(
+                chunk_id=record.chunk_id, document_id=record.document_id, document_filename=record.filename,
+                page_number=record.page_number, chunk_index=record.chunk_index, chunk_text=record.text,
+                similarity=score,
+            )))
+        if timings is not None:
+            timings["lexical"] = int((time.monotonic() - lexical_started) * 1000)
 
     ranked.sort(key=lambda item: (-item[0], -item[1].similarity, item[1].chunk_index))
     results = [result for _, result in ranked[:top_k]]

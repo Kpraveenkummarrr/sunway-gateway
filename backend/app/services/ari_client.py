@@ -102,6 +102,22 @@ class AriClient:
         )
         return response.json()
 
+    async def stop_recording(self, name: str) -> None:
+        """Ends a live recording now; Asterisk then emits RecordingFinished as
+        if it had ended by itself. Used when the worker decides the caller has
+        finished speaking (see app.services.endpointing)."""
+        await self._request("POST", f"/recordings/live/{name}/stop")
+
+    async def set_channel_variable(self, channel_id: str, variable: str, value: str) -> None:
+        """Sets a channel variable or dialplan function, e.g.
+        `TALK_DETECT(set)` (verified on Asterisk 18.10 to change barge-in
+        sensitivity on a live channel)."""
+        await self._request(
+            "POST",
+            f"/channels/{channel_id}/variable",
+            params={"variable": variable, "value": value},
+        )
+
     async def get_channel(self, channel_id: str) -> dict:
         response = await self._request("GET", f"/channels/{channel_id}")
         return response.json()

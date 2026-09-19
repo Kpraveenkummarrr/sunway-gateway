@@ -1,5 +1,10 @@
 # UAT Readiness
 
+**Latest merge gate (2026-09-19): 656 passed, 1 skipped, 0 failed in 114.08
+seconds; Python compilation clean.** The skip is the opt-in real-provider
+integration test. This is the current software regression result; it does not
+replace physical GSM/Synway, real-provider, listening, or concurrency UAT.
+
 **Current release:** see [final-pass readiness](#final-pass). Earlier pass results
 are historical; this candidate is not approved for client acceptance.
 

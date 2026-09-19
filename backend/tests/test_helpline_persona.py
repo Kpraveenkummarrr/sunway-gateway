@@ -209,6 +209,7 @@ async def test_a_real_turn_sends_the_persona_and_the_callers_district(tmp_path, 
     settings = _settings(
         referral_directory_path=_directory(tmp_path, [HISAR, ROHTAK]),
         rag_similarity_threshold=0.99,
+        llm_provider="mock",  # stub LLM: see test_call_lifecycle._make
     )
     llm = _CapturingLLM()
     session = await create_session(db_session, language="hi")

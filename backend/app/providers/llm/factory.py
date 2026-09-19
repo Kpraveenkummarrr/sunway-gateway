@@ -23,8 +23,9 @@ def get_llm_provider(settings: Settings) -> LLMProvider:
         return OpenAILLMProvider(
             api_key=settings.llm_api_key,
             model=settings.llm_model or "gpt-4o-mini",
-            timeout_seconds=settings.provider_timeout_seconds,
+            timeout_seconds=min(settings.llm_timeout_seconds, settings.provider_timeout_seconds),
             max_tokens=settings.llm_max_tokens,
+            keepalive_expiry_seconds=settings.http_keepalive_seconds,
         )
 
     if provider_name == "gemini":
@@ -36,8 +37,9 @@ def get_llm_provider(settings: Settings) -> LLMProvider:
         return OpenAILLMProvider(
             api_key=settings.gemini_api_key,
             model=settings.gemini_model or "gemini-2.5-flash",
-            timeout_seconds=settings.provider_timeout_seconds,
+            timeout_seconds=min(settings.llm_timeout_seconds, settings.provider_timeout_seconds),
             max_tokens=settings.llm_max_tokens,
+            keepalive_expiry_seconds=settings.http_keepalive_seconds,
             base_url=settings.gemini_base_url,
             provider_name="Gemini",
             reasoning_effort=settings.gemini_reasoning_effort or None,

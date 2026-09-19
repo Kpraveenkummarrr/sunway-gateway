@@ -16,6 +16,9 @@ class SynthesisResult:
 class TTSProvider(ABC):
     """Abstraction over text-to-speech vendors."""
 
+    async def warm_up(self) -> None:
+        """Open connections ahead of the first request. Optional; must never raise."""
+
     @abstractmethod
     async def synthesize(self, text: str, *, voice: str | None = None, language: str | None = None) -> SynthesisResult:
         """Synthesizes speech audio from text.

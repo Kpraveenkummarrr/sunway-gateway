@@ -4,6 +4,32 @@ Status: **CLIENT UAT REQUIRED**. The source of actual noise/robotic speech is
 unproven. Synthetic tones cannot establish human naturalness, intelligibility,
 ASR accuracy, packet loss, echo or GSM quality.
 
+## Update 2026-09-19 — what changed, and what is still unknown
+
+**Finding.** The welcome message and the AI's replies go through the *same* processing, so the
+processing chain alone does not explain "welcome clear, answers noisy". What differs is the
+**text**: the welcome is pure Devanagari; LLM replies carry digits, units, percentages,
+brackets and Latin acronyms that an Indic voice skips or mangles. That is a plausible contributor
+(not proven audible without a listener), and it is now removed at the source.
+
+| Change | Detail |
+|---|---|
+| Tempo default 1.15 → **1.0** | At 1.0 the time-stretch code is **not run** (tests fail if it is). WSOLA at 1.15 on real speech (Windows SAPI, English, 48 kHz — *not* Bhashini Hindi) moved median F0 jitter 1.83% → 1.94% and mean HNR by −0.2 dB: barely measurable, so it was **not proven** to be the robotic sound; it is off because it is unnecessary work and makes replies sound rushed |
+| `AI_AUDIO_PROFILE=clean` (default) | One band-limited resample (none if the source is already 8 kHz); gentle trim; loudness matched by the *speech* (−18 dBFS) not the peak, boost ≤ 9 dB, hard peak ceiling −3 dBFS (no clipping possible); 10 ms cosine edges. `legacy` = the previous chain, byte-identical, one setting away |
+| Spoken-text normalisation (`hindi_tts_text.py`) | Digits/ranges/%/₹/units (incl. °C, °F) → Hindi words; LSD, NDDB, LUVAS, ICAR… spoken as a farmer says them; other capitals spelled; brackets → pauses. Pure Devanagari is returned unchanged (the approved welcome is never altered). The prompt also tells Gemini to write every word in Devanagari |
+| Per-clip diagnostics | One log line per clip: source rate/duration, resampled?, tempo applied?, trim, gain, peak/RMS, clipping, noise floor, prep ms |
+
+**A/B (one switch, same source).** `scripts/telephony_voice_ab.py` now writes
+`D1_A_previous_production_legacy_1_15x` (A) and `D2_B_native_clean_1_0x` (B) plus µ-law previews and prints
+duration, peak, RMS, clipping, noise floor, spectral centroid/roll-off, F0 jitter, HNR and WPM for source, A and B.
+Run it on the client's raw Bhashini WAV: `--input-wav <raw.wav> --text "<exact transcript>"`. The comparison
+of a handset's *sound* still needs a Hindi listener — nothing here scores naturalness.
+
+**Still unknown — NOT PROVEN, requires live GSM/Synway test:** whether the residual "noise" is added
+after Asterisk (gateway DSP, GSM radio, echo). `scripts/rtp_forensics.py --reference <played WAV>` turns that
+into a number (`excess_distortion_db` ≈ 0 ⇒ the AI's audio reached the wire clean); the plan for the gateway
+side is [SYNWAY_GSM_AB_PLAN.md](SYNWAY_GSM_AB_PLAN.md).
+
 ## Stage map
 
 | Stage | Available code evidence | Required client evidence |

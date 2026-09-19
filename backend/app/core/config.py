@@ -17,6 +17,7 @@ DEFAULT_CALLER_MESSAGES: dict[str, dict[str, str]] = {
         "welcome": "Hello, thank you for calling. Please ask your question after the tone.",
         "error": "Sorry, I'm having trouble right now. Please try again later or contact us directly.",
         "goodbye": "I'm having trouble understanding. Please try calling again later. Goodbye.",
+        "closing": "Thank you for calling. If you need more information, please call again. Goodbye.",
     },
     "hi": {
         # Client-approved wording — do not edit.
@@ -29,6 +30,7 @@ DEFAULT_CALLER_MESSAGES: dict[str, dict[str, str]] = {
         ),
         "error": "क्षमा करें, अभी तकनीकी समस्या आ रही है। कृपया थोड़ी देर बाद दोबारा प्रयास करें।",
         "goodbye": "क्षमा करें, आपकी बात समझ में नहीं आ रही है। कृपया बाद में दोबारा कॉल करें। धन्यवाद।",
+        "closing": "आपसे बात करके अच्छा लगा। और जानकारी के लिए आप कभी भी दोबारा कॉल कर सकते हैं। धन्यवाद।",
     },
 }
 
@@ -46,7 +48,11 @@ LANGUAGE_POLICIES: dict[str, str] = {
         "switch the whole answer to English. Use natural sentence boundaries "
         "and pauses; do not add punctuation mechanically. No markdown, bullet "
         "points, numbered lists, headings, emojis, or special symbols. Give the "
-        "most important information first."
+        "most important information first. Your reply is read aloud by a Hindi "
+        "text-to-speech voice, so write EVERY word in Devanagari script, including "
+        "English or technical terms (write LSD as एल एस डी and mg as मिलीग्राम), "
+        "write numbers as Hindi words and never as digits, and do not use "
+        "brackets, slashes or abbreviations."
     ),
 }
 
@@ -92,19 +98,55 @@ class Settings(BaseSettings):
 
     # --- AI phone call test path (Phase 6) ---
     ai_test_extension: str = "700"
-    ai_call_timeout_seconds: int = 120  # hard cap on one AI call's total duration
-    # Caller turn capture (ARI record). End-of-speech silence is how long
-    # Asterisk waits after the caller stops talking before handing the
-    # recording over — every second here is dead air before any AI work
-    # starts. ARI accepts whole seconds only.
+    # Longest one AI call may last. It used to be 120 s and was only checked
+    # when a caller turn finished, then ended the call with no goodbye: with
+    # ~55 s per exchange the first check past 120 s landed at ~165 s (2:45).
+    # Now a polite closing message is played and it is enforced by a timer.
+    ai_call_timeout_seconds: int = 900
+    # Caller turn capture (ARI record). These are Asterisk's OWN limits and
+    # act as a backstop: Asterisk's silence detector is driven by voice
+    # frames, so a gateway that sends RTP comfort noise instead of frames
+    # during silence never lets it fire (see ai_endpoint_* below). ARI
+    # accepts whole seconds only.
     ai_end_of_speech_silence_seconds: int = 2
     ai_max_turn_seconds: int = 20
+    # Worker-side end-of-speech detection (app/services/endpointing.py): the
+    # turn is ended once the caller has been silent this long, judged from
+    # Asterisk's talk-detect events and - for gateways that stop sending voice
+    # frames - the RTP receive counters. (The recording file is deliberately
+    # not used: Asterisk writes it in 2 s blocks.) Every millisecond here is
+    # dead air before any AI work starts; too short cuts a caller off
+    # mid-thought.
+    ai_endpoint_monitor: bool = True
+    ai_endpoint_silence_ms: int = 1200
+    ai_endpoint_min_speech_ms: int = 250
+    ai_endpoint_use_rtp_statistics: bool = True
     # Consecutive seconds of no speech (across re-prompted turns) before
     # the call says goodbye and hangs up.
     ai_no_input_timeout_seconds: int = 20
-    # Playback tempo for synthesized speech, pitch preserved (1.0 = as the
-    # TTS vendor produced it).
-    ai_tts_speed: float = 1.15
+    # Barge-in sensitivity (Asterisk TALK_DETECT), applied to every AI call
+    # through ARI so it can be tuned without editing the dialplan. The
+    # threshold is the mean |sample| a frame needs to count as the caller
+    # talking - NOT a duration. The dialplan's 500 missed soft-spoken callers
+    # (a mean |sample| of 350 never fired); Asterisk's own default is 256.
+    # Raise it if line noise or the AI's own echo cuts replies short.
+    # silence_ms is how long Asterisk waits before reporting "finished talking";
+    # keep it short (100-300): it is also the voice-frame hangover a
+    # comfort-noise gateway must provide for that event to arrive at all.
+    ai_talk_detect_override: bool = True
+    ai_talk_detect_threshold: int = 350
+    ai_talk_detect_silence_ms: int = 200
+    # Playback tempo for synthesized speech, pitch preserved. 1.0 means NO
+    # tempo processing at all: the samples are not touched. Any other value
+    # runs the explicit time-stretch stage.
+    ai_tts_speed: float = 1.0
+    # "clean": single band-limited resample, gentle trim, level matched by
+    # speech loudness with a hard peak ceiling. "legacy": the previous chain
+    # (aggressive trim, per-clip peak normalisation), kept so the two can be
+    # compared on the same text with one switch.
+    ai_audio_profile: str = "clean"
+    ai_tts_target_rms_dbfs: float = -18.0  # loudness of the speech itself (clean profile)
+    ai_tts_peak_ceiling_dbfs: float = -3.0  # hard ceiling; leaves headroom for the gateway/GSM codec
     # Play Asterisk's record beep before each caller turn. Off by default:
     # a beep every turn sounds like an answering machine, and after a
     # barge-in it lands while the caller is already speaking. A barge-in
@@ -115,6 +157,9 @@ class Settings(BaseSettings):
     ai_welcome_message: str = ""
     ai_error_message: str = ""
     ai_goodbye_message: str = ""
+    # Played when a call reaches its maximum duration (a neutral closing, not
+    # the "I could not understand you" goodbye).
+    ai_closing_message: str = ""
 
     # SMG4004 — REQUIRES PHYSICAL GATEWAY. Kept as plain placeholders; no
     # behavior in this codebase may assume these are populated or correct.
@@ -181,6 +226,17 @@ class Settings(BaseSettings):
     # Shared by every provider factory (STT/LLM/TTS) — how long to wait on
     # a real provider call before treating it as failed.
     provider_timeout_seconds: float = 30.0
+    # Per-stage ceilings, each capped by provider_timeout_seconds. A stalled
+    # request is worse than a quick apology, and an SDK's own retry waits could
+    # otherwise stretch one call towards the full 30 s.
+    stt_timeout_seconds: float = 15.0
+    llm_timeout_seconds: float = 12.0
+    tts_timeout_seconds: float = 12.0
+    # How long idle HTTP connections to Bhashini/Gemini stay open for reuse.
+    # httpx's own default (5 s) is shorter than the gap between turns, so every
+    # request paid DNS + TCP + TLS again (measured 0.15-0.3 s each on this
+    # network, several per turn).
+    http_keepalive_seconds: float = 120.0
 
     # Conversation orchestration policy.
     ai_language: str = "en"
@@ -203,7 +259,11 @@ class Settings(BaseSettings):
     # JSON file of district diagnostic centres the agent may name. Unset
     # means the agent is told to name none, never to guess one.
     referral_directory_path: str = ""
-    ai_max_context_chars: int = 2000
+    # Room for whole retrieved chunks: rag_top_k (4) x rag_chunk_size (800) plus
+    # each chunk's source header is ~3,500 characters. At the old 2,000 the third
+    # and fourth chunks were cut off mid-sentence, so the model was shown half
+    # of the evidence retrieval had found.
+    ai_max_context_chars: int = 3600
     ai_max_history_messages: int = 20
     # Overall cap on one conversation turn (embed + RAG search + LLM, or
     # STT + that + TTS for an audio turn) — belt-and-suspenders on top of
@@ -225,6 +285,10 @@ class Settings(BaseSettings):
     rag_local_threads: int = 2
     rag_top_k: int = 4
     rag_similarity_threshold: float = 0.75
+    # Optional JSON file of extra retrieval synonym groups (a list of lists of
+    # words that mean the same thing to a caller). Edit it without a code change;
+    # see config/retrieval_synonyms.example.json. Empty = built-in groups only.
+    rag_synonyms_path: str = ""
     rag_chunk_size: int = 800
     rag_chunk_overlap: int = 150
 
@@ -247,11 +311,12 @@ class Settings(BaseSettings):
         return self.app_secret_key or self.internal_api_key or self.admin_password
 
     def caller_message(self, kind: str) -> str:
-        """`kind` is "welcome", "error", or "goodbye"."""
+        """`kind` is "welcome", "error", "goodbye" or "closing"."""
         configured = {
             "welcome": self.ai_welcome_message,
             "error": self.ai_error_message,
             "goodbye": self.ai_goodbye_message,
+            "closing": self.ai_closing_message,
         }[kind]
         if configured.strip():
             return configured

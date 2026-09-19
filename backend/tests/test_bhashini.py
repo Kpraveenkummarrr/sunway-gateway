@@ -461,7 +461,7 @@ class _CapturingLLM(LLMProvider):
 
 @pytest.mark.asyncio
 async def test_hindi_session_sends_hindi_policy_to_llm(db_session) -> None:
-    settings = _settings(ai_system_prompt="Base prompt.", rag_similarity_threshold=0.99)
+    settings = _settings(ai_system_prompt="Base prompt.", rag_similarity_threshold=0.99, llm_provider="mock")
     llm = _CapturingLLM()
     session = await create_session(db_session, language="hi")
     try:

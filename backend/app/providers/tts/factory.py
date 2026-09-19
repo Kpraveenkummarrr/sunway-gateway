@@ -37,7 +37,8 @@ def get_tts_provider(settings: Settings) -> TTSProvider:
             client=BhashiniClient(
                 api_key=settings.bhashini_inference_api_key,
                 inference_url=settings.bhashini_inference_url,
-                timeout_seconds=settings.provider_timeout_seconds,
+                timeout_seconds=min(settings.tts_timeout_seconds, settings.provider_timeout_seconds),
+                keepalive_expiry_seconds=settings.http_keepalive_seconds,
             ),
             service_id=settings.bhashini_tts_service_id,
             gender=settings.bhashini_tts_gender,

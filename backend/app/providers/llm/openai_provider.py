@@ -27,6 +27,7 @@ class OpenAILLMProvider(LLMProvider):
         base_url: str | None = None,
         provider_name: str = "OpenAI",
         reasoning_effort: str | None = None,
+        keepalive_expiry_seconds: float = 120.0,
     ) -> None:
         if not api_key:
             raise LLMProviderError(f"{provider_name} LLM API key is not set")
@@ -39,6 +40,7 @@ class OpenAILLMProvider(LLMProvider):
         # Only sent when configured: OpenAI's non-reasoning models (e.g.
         # gpt-4o-mini) reject the parameter.
         self._reasoning_effort = reasoning_effort
+        self._keepalive_expiry_seconds = keepalive_expiry_seconds
         self._client = None
 
     @property
@@ -54,8 +56,32 @@ class OpenAILLMProvider(LLMProvider):
                     f"The {self._provider_name} LLM provider requires the 'openai' package "
                     "(pip install openai)."
                 ) from exc
-            self._client = AsyncOpenAI(api_key=self._api_key, base_url=self._base_url)
+            import httpx
+
+            # One SDK retry, not two: it honours a server's Retry-After (up to
+            # a minute), so a rate-limited request could sit silently for far
+            # longer than a phone caller will wait. The overall wait_for below
+            # still bounds the whole call. Connections are kept alive between
+            # turns instead of being re-established each time.
+            self._client = AsyncOpenAI(
+                api_key=self._api_key,
+                base_url=self._base_url,
+                max_retries=1,
+                http_client=httpx.AsyncClient(
+                    timeout=httpx.Timeout(self._timeout_seconds),
+                    limits=httpx.Limits(keepalive_expiry=self._keepalive_expiry_seconds),
+                ),
+            )
         return self._client
+
+    async def warm_up(self) -> None:
+        try:
+            client = self._get_client()
+            http = getattr(client, "_client", None)
+            if http is not None:
+                await http.head(str(client.base_url), timeout=5.0)
+        except Exception:  # noqa: BLE001 - best effort, must never fail a call
+            pass
 
     def for_max_tokens(self, max_tokens: int) -> "OpenAILLMProvider":
         if max_tokens == self._max_tokens:

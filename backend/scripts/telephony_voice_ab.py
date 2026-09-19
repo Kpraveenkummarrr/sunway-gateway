@@ -181,6 +181,21 @@ async def main() -> int:
         f"Current={current_speed:.2f}x/{current['duration_seconds']:.2f}s; "
         f"candidate=1.00x/{candidate['duration_seconds']:.2f}s; target={ASTERISK_SAMPLE_RATE}Hz"
     )
+    a = report["files"]["D1_A_previous_production_legacy_1_15x_8k.wav"]
+    b = report["files"]["D2_B_native_clean_1_0x_8k.wav"]
+    print("\nA = previous production chain (legacy, 1.15x)   B = current production chain (clean, native pace)")
+    print(f"{'measure':28} {'source':>10} {'A':>10} {'B':>10}")
+    for label, key, fmt in (
+        ("sample rate (Hz)", "sample_rate_hz", "{:.0f}"), ("duration (s)", "duration_seconds", "{:.2f}"),
+        ("peak (dBFS)", "peak_dbfs", "{:.1f}"), ("RMS (dBFS)", "rms_dbfs", "{:.1f}"),
+        ("clipped share", "clipped_ratio", "{:.4f}"), ("noise floor (dBFS)", "noise_floor_dbfs", "{:.1f}"),
+        ("spectral centroid (Hz)", "spectral_centroid_hz", "{:.0f}"), ("95% rolloff (Hz)", "spectral_rolloff_95_hz", "{:.0f}"),
+        ("F0 jitter, median (%)", "f0_jitter_median_pct", "{:.2f}"), ("HNR mean (dB)", "hnr_mean_db", "{:.1f}"),
+        ("words per minute", "words_per_minute", "{:.0f}"),
+    ):
+        cells = [("-" if row.get(key) is None else fmt.format(row[key])) for row in (source, a, b)]
+        print(f"{label:28} {cells[0]:>10} {cells[1]:>10} {cells[2]:>10}")
+    print("Objective diagnostics only. Which one sounds better on a handset needs a Hindi-speaking listener.")
     print(f"A/B WAVs and safe report written to {args.out}")
     return 0
 

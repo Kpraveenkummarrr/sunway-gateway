@@ -29,6 +29,9 @@ class BhashiniSTTProvider(STTProvider):
         self._service_id = service_id
         self._language = language
 
+    async def warm_up(self) -> None:
+        await self._client.warm_up()
+
     async def transcribe(self, audio_bytes: bytes, *, language: str | None = None) -> TranscriptionResult:
         if not audio_bytes:
             raise STTProviderError("Audio input is empty")

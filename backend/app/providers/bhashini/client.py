@@ -45,6 +45,7 @@ class BhashiniClient:
         inference_url: str = DEFAULT_INFERENCE_URL,
         timeout_seconds: float = 30.0,
         transport: httpx.AsyncBaseTransport | None = None,
+        keepalive_expiry_seconds: float = 120.0,
     ) -> None:
         if not api_key:
             raise BhashiniError("BHASHINI_INFERENCE_API_KEY is not set")
@@ -52,12 +53,28 @@ class BhashiniClient:
         self._inference_url = inference_url
         self._timeout_seconds = timeout_seconds
         self._transport = transport
+        self._keepalive_expiry_seconds = keepalive_expiry_seconds
         self._http: httpx.AsyncClient | None = None
 
     def _get_http(self) -> httpx.AsyncClient:
         if self._http is None:
-            self._http = httpx.AsyncClient(timeout=self._timeout_seconds, transport=self._transport)
+            self._http = httpx.AsyncClient(
+                timeout=self._timeout_seconds,
+                transport=self._transport,
+                # Reuse the connection between turns instead of re-doing DNS,
+                # TCP and TLS for every request.
+                limits=httpx.Limits(keepalive_expiry=self._keepalive_expiry_seconds),
+            )
         return self._http
+
+    async def warm_up(self) -> None:
+        """Opens the connection (DNS, TCP, TLS) before the first real request,
+        so the caller's first question does not pay for it. Best effort: the
+        response is irrelevant and nothing here may ever raise."""
+        try:
+            await self._get_http().head(self._inference_url, timeout=5.0)
+        except Exception:  # noqa: BLE001
+            pass
 
     async def aclose(self) -> None:
         if self._http is not None:

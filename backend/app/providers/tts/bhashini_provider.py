@@ -39,6 +39,9 @@ class BhashiniTTSProvider(TTSProvider):
         self._gender = gender
         self._language = language
 
+    async def warm_up(self) -> None:
+        await self._client.warm_up()
+
     async def synthesize(self, text: str, *, voice: str | None = None, language: str | None = None) -> SynthesisResult:
         if not text or not text.strip():
             raise TTSProviderError("Cannot synthesize empty text")

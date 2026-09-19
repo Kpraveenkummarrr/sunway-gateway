@@ -72,9 +72,11 @@ from app.services.audio import (
     is_too_short,
     make_short_beep_wav,
     measure_levels,
-    prepare_tts_for_playback,
+    prepare_tts_clip,
     read_wav_info,
 )
+from app.services.endpointing import EndOfSpeechTracker, EndpointConfig, monitor_turn
+from app.services.hindi_tts_text import hindi_tts_text, unspoken_latin
 from app.services.system_config import effective_settings
 from app.services.spoken_text import spoken_text
 from app.services.knowledge_search import SearchError
@@ -92,7 +94,7 @@ _RECORDING_NAME_PREFIX = "ai-agent__"
 # ARI answers "404 Channel not found" or "409 Channel not in a Stasis
 # application" once the channel has hung up / left our app.
 _CHANNEL_GONE_STATUSES = (404, 409)
-_CALLER_MESSAGE_KINDS = ("welcome", "error", "goodbye")
+_CALLER_MESSAGE_KINDS = ("welcome", "error", "goodbye", "closing")
 
 _SENTENCE_BREAK = re.compile(r"(?<=[।॥?!])\s+|(?<=\.)\s+")
 _SENTENCE_END = ("।", "॥", "?", "!", ".")
@@ -191,6 +193,19 @@ class CallState:
         "consumed_recording_seq",
         "settings",
         "last_talk_finished",
+        "reply_in_progress",
+        "recording_name",
+        "recording_task",
+        "endpoint_stopped_seq",
+        "endpoint_last_speech",
+        "endpoint_reason",
+        "tracker",
+        "talking",
+        "deadline_task",
+        "turns_completed",
+        "barge_in_count",
+        "playback_started_monotonic",
+        "answered_monotonic",
     )
 
     def __init__(
@@ -219,6 +234,25 @@ class CallState:
         self.consumed_recording_seq = 0
         self.settings: Settings | None = None
         self.last_talk_finished: float | None = None
+        # True from the first reply chunk being requested until the reply is
+        # finished or discarded - including the pauses between chunks while the
+        # next one is still being synthesized, when nothing is playing.
+        self.reply_in_progress = False
+        self.recording_name: str | None = None
+        self.recording_task: asyncio.Task | None = None
+        # Which recording the worker ended itself (vs Asterisk ending it).
+        self.endpoint_stopped_seq = 0
+        self.endpoint_last_speech: float | None = None
+        self.endpoint_reason: str | None = None
+        # End-of-speech tracker of the recording that is open, fed by Asterisk's
+        # talk-detect events; and whether the caller is talking right now.
+        self.tracker: EndOfSpeechTracker | None = None
+        self.talking = False
+        self.deadline_task: asyncio.Task | None = None
+        self.turns_completed = 0
+        self.barge_in_count = 0
+        self.playback_started_monotonic: float | None = None
+        self.answered_monotonic: float | None = None
 
     @property
     def is_active(self) -> bool:
@@ -259,7 +293,7 @@ class AICallController:
         self._playback_finished: dict[str, asyncio.Event] = {}
         self._background_tasks: set[asyncio.Task] = set()
         # Rendered fixed caller phrases, keyed by text; shared by all calls.
-        self._phrase_clips: dict[tuple[str, str, float], asyncio.Future] = {}
+        self._phrase_clips: dict[tuple, asyncio.Future] = {}
 
     @property
     def active_call_count(self) -> int:
@@ -312,15 +346,32 @@ class AICallController:
             elif event_type == "PlaybackFinished":
                 self._on_playback_finished(event)
             elif event_type == "ChannelTalkingStarted":
+                self._track_talking(event, started=True)
                 await self._on_talking_started(event)
             elif event_type == "ChannelTalkingFinished":
-                state = self._calls.get((event.get("channel") or {}).get("id"))
-                if state is not None:
-                    state.last_talk_finished = time.monotonic()
+                self._track_talking(event, started=False)
             elif event_type in ("StasisEnd", "ChannelHangupRequest", "ChannelDestroyed"):
                 await self._on_hangup(event)
         except Exception:  # noqa: BLE001 - one bad event must not kill the loop
             logger.exception("Unhandled error processing ARI event %s", event_type)
+
+    def _track_talking(self, event: dict, *, started: bool) -> None:
+        """Feeds Asterisk's talk-detect events to the end-of-speech tracker of
+        the turn being recorded. Synchronous and first, so the tracker never
+        lags an event that barge-in handling is still awaiting."""
+        state = self._calls.get((event.get("channel") or {}).get("id"))
+        if state is None:
+            return
+        now = time.monotonic()
+        state.talking = started
+        if not started:
+            state.last_talk_finished = now
+        tracker = state.tracker
+        if tracker is not None:
+            if started:
+                tracker.talking_started(now)
+            else:
+                tracker.talking_finished(now, event.get("duration"))
 
     # ---- call lifecycle ----
 
@@ -384,7 +435,15 @@ class AICallController:
                 await self._finish_call(channel_id, status="failed", hangup_cause="answer_failed")
             return
 
+        state.answered_monotonic = time.monotonic()
         self._start_background_diagnostic(self._log_media_formats(channel_id))
+        # While the welcome plays, open the connections the first question will
+        # need, so it does not pay for DNS + TCP + TLS on top of the AI work.
+        self._start_background_diagnostic(self._warm_providers())
+        await self._apply_talk_detect(state)
+        # Enforced by a timer, not only at turn boundaries (see _call_deadline).
+        state.deadline_task = asyncio.create_task(self._call_deadline(state))
+        state.deadline_task.add_done_callback(self._log_task_failure("call deadline timer"))
 
         async with self._session_factory() as db:
             call_row = await db.get(Call, state.call_row_id)
@@ -395,6 +454,146 @@ class AICallController:
         await self._play_welcome(state)
         if state.is_active:  # the caller may hang up during the welcome
             await self._start_next_recording(state)
+
+    async def _warm_providers(self) -> None:
+        started = time.monotonic()
+        await asyncio.gather(
+            self._stt_provider.warm_up(),
+            self._llm_provider.warm_up(),
+            self._tts_provider.warm_up(),
+            return_exceptions=True,
+        )
+        logger.info("Provider connections warmed in %dms", _ms_since(started))
+
+    @staticmethod
+    def _log_task_failure(what: str):
+        def done(task: asyncio.Task) -> None:
+            if not task.cancelled() and task.exception() is not None:
+                logger.warning("%s failed: %r", what, task.exception())
+
+        return done
+
+    async def _apply_talk_detect(self, state: CallState, *, reset: bool = False) -> None:
+        """Sets barge-in sensitivity on this call's channel. The dialplan
+        hardcodes it; doing it here makes it a setting, and it works for every
+        way a call can reach the AI (verified on Asterisk 18.10: the override
+        takes effect immediately).
+
+        `reset` removes the detector first, so it starts from "nobody is
+        talking". Measured on Asterisk 18.10: a gateway that goes from speech
+        straight to comfort noise / silence leaves the detector believing the
+        caller is still talking (its silence clock only runs on voice frames),
+        and it then never reports the *next* burst of speech - barge-in would be
+        dead for the whole reply. A fresh detector always reports it."""
+        settings = self._settings_for(state)
+        if not settings.ai_talk_detect_override:
+            return  # the dialplan owns TALK_DETECT; do not remove what it set up
+        value = f"{settings.ai_talk_detect_silence_ms},{settings.ai_talk_detect_threshold}"
+        try:
+            if reset:
+                await self._ari.set_channel_variable(state.channel_id, "TALK_DETECT(remove)", "1")
+                state.talking = False
+            await self._ari.set_channel_variable(state.channel_id, "TALK_DETECT(set)", value)
+        except AriError as exc:
+            if _channel_gone(exc):
+                return
+            logger.warning(
+                "Could not apply the barge-in sensitivity on channel %s (%s); the dialplan's values stay in effect",
+                state.channel_id, exc,
+            )
+            return
+        if not reset:
+            logger.info(
+                "Barge-in sensitivity applied: channel=%s talk_detect=%s (silence_ms,magnitude)",
+                state.channel_id, value,
+            )
+
+    async def _end_if_over_duration(self, state: CallState) -> bool:
+        """Closes the call politely if it has run past AI_CALL_TIMEOUT_SECONDS.
+        Returns True if it did. 0 disables the limit."""
+        limit = self._settings_for(state).ai_call_timeout_seconds
+        if limit <= 0 or not state.is_active or self._elapsed_seconds(state) <= limit:
+            return False
+        logger.info(
+            "Call reached its maximum duration: channel=%s elapsed=%.0fs limit=%ds - closing with a goodbye",
+            state.channel_id, self._elapsed_seconds(state), limit,
+        )
+        await self._end_call_with_goodbye(state, hangup_cause="max_duration", kind="closing")
+        return True
+
+    async def _call_deadline(self, state: CallState) -> None:
+        """Timer behind AI_CALL_TIMEOUT_SECONDS. The limit used to be checked
+        only when a caller turn finished, so a call was cut at whichever turn
+        boundary came first after it - ~165 s with ~55 s exchanges - and with no
+        goodbye. Now, when the time is up: if the AI is listening, the turn is
+        ended so the call closes at once; if it is thinking or speaking, the
+        answer finishes and the call closes when it would listen next."""
+        limit = self._settings_for(state).ai_call_timeout_seconds
+        if limit <= 0:
+            return
+        try:
+            await asyncio.wait_for(state.ended.wait(), timeout=max(0.0, limit - self._elapsed_seconds(state)))
+            return  # the call ended first
+        except asyncio.TimeoutError:
+            pass
+        name = state.recording_name
+        if state.is_active and name and state.consumed_recording_seq < state.recording_seq:
+            try:
+                await self._ari.stop_recording(name)
+            except AriError:
+                pass  # the recording just ended by itself; its handler closes the call
+
+    def _start_endpoint_monitor(self, state: CallState, name: str, seq: int, settings: Settings) -> None:
+        """Ends this turn's recording once the caller has stopped talking,
+        independently of the gateway's RTP behaviour (see
+        app.services.endpointing for the two signals used and why the recording
+        file is not one of them). Asterisk's own limits remain as a backstop."""
+        if not settings.ai_endpoint_monitor:
+            return
+        config = EndpointConfig(
+            silence_ms=settings.ai_endpoint_silence_ms,
+            min_speech_ms=settings.ai_endpoint_min_speech_ms,
+            # With the override off the dialplan's own TALK_DETECT applies: 200 ms in this project.
+            talk_detect_silence_ms=settings.ai_talk_detect_silence_ms if settings.ai_talk_detect_override else 200,
+            use_rtp_statistics=settings.ai_endpoint_use_rtp_statistics,
+        )
+        # A caller who is already mid-sentence (they interrupted the prompt) has had
+        # their "started" event already.
+        tracker = EndOfSpeechTracker(config, time.monotonic(), already_talking=state.talking)
+        state.tracker = tracker
+
+        def is_current() -> bool:
+            return state.is_active and state.recording_seq == seq and state.consumed_recording_seq < seq
+
+        async def sample_rtp() -> tuple[int, int] | None:
+            try:
+                stats = await self._ari.get_rtp_statistics(state.channel_id)
+                return int(stats["rxcount"]), int(stats["rxoctetcount"])
+            except (AriError, KeyError, TypeError, ValueError):
+                return None
+
+        async def on_end(decision) -> None:
+            state.endpoint_stopped_seq = seq
+            state.endpoint_last_speech = decision.last_speech_at
+            state.endpoint_reason = decision.reason
+            logger.info(
+                "Caller finished speaking: channel=%s turn=%d signal=%s speech=%dms silence>=%dms - ending the recording",
+                state.channel_id, seq, decision.reason, decision.speech_ms, settings.ai_endpoint_silence_ms,
+            )
+            try:
+                await self._ari.stop_recording(name)
+            except AriError as exc:
+                if exc.status_code not in (404, 409):
+                    logger.warning("Could not end recording %s: %s", name, exc)
+
+        task = asyncio.ensure_future(monitor_turn(tracker, is_current=is_current, on_end=on_end, sample_rtp=sample_rtp))
+        task.add_done_callback(self._log_task_failure("end-of-speech monitor"))
+        state.recording_task = task
+
+    @staticmethod
+    def _cancel_task(task: asyncio.Task | None) -> None:
+        if task is not None and not task.done():
+            task.cancel()
 
     async def _refresh_settings(self) -> None:
         """Picks up settings changed in the admin panel, so a change takes
@@ -423,6 +622,8 @@ class AICallController:
     async def _start_next_recording(self, state: CallState) -> None:
         if not state.is_active:
             return
+        if await self._end_if_over_duration(state):
+            return
         after_barge_in = state.barge_in_generation > state.beeped_generation
         state.beeped_generation = state.barge_in_generation
         state.recording_seq += 1
@@ -435,6 +636,8 @@ class AICallController:
         # error: No such file or directory"). Keep it flat; "__" as the
         # separator since it can't appear in a UUID.
         name = f"{_RECORDING_NAME_PREFIX}{state.session_id}__{state.recording_seq}"
+        state.recording_name = name
+        self._cancel_task(state.recording_task)
         try:
             await self._ari.record(
                 state.channel_id,
@@ -445,6 +648,7 @@ class AICallController:
                 # beep would land on top of their speech.
                 beep=settings.ai_record_beep and not after_barge_in,
             )
+            self._start_endpoint_monitor(state, name, state.recording_seq, settings)
         except AriError as exc:
             if _channel_gone(exc):
                 logger.info("Recording not started on channel %s: channel already gone", state.channel_id)
@@ -469,7 +673,11 @@ class AICallController:
         if not _seq.isdigit() or int(_seq) != state.recording_seq or int(_seq) <= state.consumed_recording_seq:
             return
         state.consumed_recording_seq = int(_seq)
+        self._cancel_task(state.recording_task)
+        state.tracker = None
         settings = self._settings_for(state)
+        # Off the reply's critical path: ASR/LLM/TTS take far longer than this.
+        self._start_background_diagnostic(self._apply_talk_detect(state, reset=True))
         if state.last_talk_finished is not None:
             logger.info("Stage call_id=%s turn_id=%d stage=talk_finished_event_to_recording duration_ms=%d",
                         state.channel_id, state.recording_seq, _ms_since(state.last_talk_finished))
@@ -479,9 +687,29 @@ class AICallController:
             else None
         )
 
-        if self._elapsed_seconds(state) > settings.ai_call_timeout_seconds:
-            logger.info("Call timeout reached for channel %s", state.channel_id)
-            await self._finish_call(state.channel_id, status="completed", hangup_cause="timeout")
+        # Why this turn ended - the single most useful fact when responses are
+        # slow: a turn that ends at the maximum duration means silence was never
+        # detected (comfort-noise gateway, or line noise above Asterisk's threshold).
+        if state.endpoint_stopped_seq == int(_seq):
+            ended_by = f"worker end-of-speech detector [{state.endpoint_reason}]"
+        elif capture_ms is not None and capture_ms >= settings.ai_max_turn_seconds * 1000 - 800:
+            ended_by = "MAX DURATION (silence was never detected)"
+        else:
+            ended_by = "Asterisk silence detector"
+        end_wait_ms = (
+            _ms_since(state.endpoint_last_speech)
+            if state.endpoint_stopped_seq == int(_seq) and state.endpoint_last_speech is not None
+            else None
+        )
+        logger.info(
+            "Recording finished: channel=%s turn=%s ended_by=%s capture_ms=%s end_of_speech_wait_ms=%s "
+            "audio_duration_s=%s talking_s=%s silence_s=%s",
+            state.channel_id, _seq, ended_by, capture_ms if capture_ms is not None else "-",
+            end_wait_ms if end_wait_ms is not None else "-", recording.get("duration", "-"),
+            recording.get("talking_duration", "-"), recording.get("silence_duration", "-"),
+        )
+
+        if await self._end_if_over_duration(state):
             return
 
         audio_format = recording.get("format", "wav")
@@ -507,12 +735,16 @@ class AICallController:
             wav_info = None
 
         if wav_info is not None and (is_too_short(wav_info) or is_effectively_silent(audio_bytes)):
-            state.silent_seconds += wav_info.duration_seconds
+            # Wall-clock, not audio length: a gateway that stops sending during
+            # silence writes almost no audio for a long wait, and counting only
+            # the audio would let a silent caller hold the line indefinitely.
+            waited = max(wav_info.duration_seconds, (capture_ms or 0) / 1000.0)
+            state.silent_seconds += waited
             logger.info(
                 "Turn %d on channel %s had no speech (%.2fs) — %.1fs of %ds without input",
                 state.recording_seq,
                 state.channel_id,
-                wav_info.duration_seconds,
+                waited,
                 state.silent_seconds,
                 settings.ai_no_input_timeout_seconds,
             )
@@ -545,6 +777,7 @@ class AICallController:
             turn_started=turn_started,
             audio_seconds=wav_info.duration_seconds if wav_info is not None else 0.0,
             capture_ms=capture_ms,
+            end_wait_ms=end_wait_ms,
         )
 
     async def _run_turn(
@@ -555,6 +788,7 @@ class AICallController:
         turn_started: float | None = None,
         audio_seconds: float = 0.0,
         capture_ms: int | None = None,
+        end_wait_ms: int | None = None,
     ) -> None:
         turn_started = turn_started if turn_started is not None else time.monotonic()
         reply_text: str | None = None
@@ -639,7 +873,8 @@ class AICallController:
                     "Turn timing channel=%s turn=%d audio=%.1fs capture_ms=%sms asr_ms=%sms "
                     "embedding_ms=%sms retrieval_ms=%sms context_ms=%sms llm_ms=%sms "
                     "tts_ms=%sms audio_ms=%sms reply_chars=%d chunks=%d first_audio_ready_ms=%sms "
-                    "tts_first_ms=%sms prep_first_ms=%sms speaking_ms=%d total_ms=%d",
+                    "tts_first_ms=%sms prep_first_ms=%sms speaking_ms=%d total_ms=%d "
+                    "end_wait_ms=%sms heard_delay_ms=%sms",
                     state.channel_id,
                     state.recording_seq,
                     audio_seconds,
@@ -658,8 +893,14 @@ class AICallController:
                     speech["prep_first_ms"] if speech["prep_first_ms"] is not None else "-",
                     _ms_since(reply_started),
                     _ms_since(turn_started),
+                    end_wait_ms if end_wait_ms is not None else "-",
+                    # last caller speech -> first reply audio ready locally
+                    (end_wait_ms + pre_reply_ms + first_audio_ms)
+                    if end_wait_ms is not None and first_audio_ms is not None else "-",
                 )
 
+        if succeeded:
+            state.turns_completed += 1
         await self._start_next_recording(state)
 
     async def _register_failure(self, state: CallState) -> bool:
@@ -681,9 +922,9 @@ class AICallController:
         await self._end_call_with_goodbye(state, hangup_cause="too_many_failed_turns")
         return True
 
-    async def _end_call_with_goodbye(self, state: CallState, *, hangup_cause: str) -> None:
+    async def _end_call_with_goodbye(self, state: CallState, *, hangup_cause: str, kind: str = "goodbye") -> None:
         try:
-            await self._play_caller_message(state, "goodbye")
+            await self._play_caller_message(state, kind)
         except (TTSProviderError, AriError):
             logger.exception("Could not play goodbye message on channel %s", state.channel_id)
         await self._finish_call(state.channel_id, status="completed", hangup_cause=hangup_cause)
@@ -769,6 +1010,13 @@ class AICallController:
         """TTS + telephone preparation for one piece of text, independent of
         any call. Raises TTSProviderError."""
         settings = settings or self._settings
+        if settings.ai_language == "hi":
+            # Digits, units and Latin acronyms are what an Indic voice mishandles;
+            # the welcome (pure Devanagari) passes through unchanged.
+            latin = unspoken_latin(text)
+            if latin:
+                logger.info("TTS text still has Latin words the voice may mishandle: %s", latin[:8])
+            text = hindi_tts_text(text)
         tts_started = time.monotonic()
         result = await self._tts_provider.synthesize(text, language=settings.ai_language)
         tts_ms = _ms_since(tts_started)
@@ -791,21 +1039,22 @@ class AICallController:
             raise TTSProviderError(f"Unsupported TTS audio format for Asterisk playback: {result.audio_format!r}")
         prep_started = time.monotonic()
         try:
-            source_info = read_wav_info(result.audio_bytes)
-            source_levels = measure_levels(result.audio_bytes)
-            audio = await asyncio.to_thread(
-                prepare_tts_for_playback, result.audio_bytes, speed=settings.ai_tts_speed
+            # One call, off the event loop: prepare AND measure. The cheap
+            # level measurements used to run on the loop, per chunk, per call.
+            prepared = await asyncio.to_thread(
+                prepare_tts_clip,
+                result.audio_bytes,
+                speed=settings.ai_tts_speed,
+                profile=settings.ai_audio_profile,
+                target_rms_dbfs=settings.ai_tts_target_rms_dbfs,
+                peak_ceiling_dbfs=settings.ai_tts_peak_ceiling_dbfs,
             )
-            seconds = read_wav_info(audio).duration_seconds
         except AudioFormatError as exc:
             raise TTSProviderError(f"Could not prepare TTS audio for playback: {exc}") from exc
+        audio, clip = prepared.audio, prepared.diagnostics
+        seconds = clip.final_duration_s
         prep_ms = _ms_since(prep_started)
-        levels = measure_levels(audio)
         words = len(text.split())
-        words_per_minute = (words / seconds * 60.0) if seconds > 0 else 0.0
-        source_words_per_minute = (
-            words / source_info.duration_seconds * 60.0 if source_info.duration_seconds > 0 else 0.0
-        )
         model = (
             self._settings.bhashini_tts_service_id
             if self._settings.tts_provider.strip().lower() == "bhashini"
@@ -816,43 +1065,18 @@ class AICallController:
             if self._settings.tts_provider.strip().lower() == "bhashini"
             else self._settings.tts_voice or "default"
         )
-
+        # One line per clip with everything needed to tell WHICH stage made a
+        # clip sound wrong: what came in, what was done to it, what went out.
         logger.info(
-            "TTS source: provider=%s model=%s voice=%s chars=%d words=%d rate=%dHz channels=%d bits=%d "
-            "duration=%.2fs speech_rate=%.1f words/min peak=%.1fdBFS rms=%.1fdBFS noise_floor=%.1fdBFS "
-            "leading=%.3fs trailing=%.3fs clipped=%.4f tts=%dms",
+            "TTS clip: provider=%s model=%s voice=%s chars=%d words=%d tts=%dms | %s | speech_rate=%.1f words/min",
             self._settings.tts_provider,
             model,
             voice,
             len(text),
             words,
-            source_info.sample_rate,
-            source_info.channels,
-            source_info.sample_width * 8,
-            source_info.duration_seconds,
-            source_words_per_minute,
-            source_levels.peak_dbfs,
-            source_levels.rms_dbfs,
-            source_levels.noise_floor_dbfs,
-            source_levels.leading_silence_seconds,
-            source_levels.trailing_silence_seconds,
-            source_levels.clipped_ratio,
             tts_ms,
-        )
-        logger.info(
-            "TTS prepared: target=%dHz duration=%.2fs tempo=%.2fx speech_rate=%.1f words/min "
-            "peak=%.1fdBFS rms=%.1fdBFS peak_delta=%.1fdB leading=%.3fs trailing=%.3fs clipped=%.4f prep=%dms",
-            ASTERISK_SAMPLE_RATE,
-            seconds,
-            settings.ai_tts_speed,
-            words_per_minute,
-            levels.peak_dbfs,
-            levels.rms_dbfs,
-            levels.peak_dbfs - source_levels.peak_dbfs,
-            levels.leading_silence_seconds,
-            levels.trailing_silence_seconds,
-            levels.clipped_ratio,
-            prep_ms,
+            clip.summary(),
+            (words / seconds * 60.0) if seconds > 0 else 0.0,
         )
         return SpeechClip(audio=audio, tts_ms=tts_ms, prep_ms=prep_ms, seconds=seconds)
 
@@ -860,7 +1084,8 @@ class AICallController:
         """The shared rendering of a fixed caller phrase, started on first use.
         A failed or cancelled rendering is replaced on the next request."""
         settings = settings or self._settings
-        key = (text, settings.ai_language, settings.ai_tts_speed)
+        key = (text, settings.ai_language, settings.ai_tts_speed, settings.ai_audio_profile,
+               settings.ai_tts_target_rms_dbfs, settings.ai_tts_peak_ceiling_dbfs)
         future = self._phrase_clips.get(key)
         if future is None or (future.done() and (future.cancelled() or future.exception() is not None)):
             future = asyncio.ensure_future(self._render_speech(text, settings=settings))
@@ -923,6 +1148,11 @@ class AICallController:
         settings = self._settings_for(state)
         pending = asyncio.ensure_future(self._render_speech(chunks[0], settings=settings))
         barge_in_generation = state.barge_in_generation
+        # Marks the whole reply - including the pauses while the next chunk is
+        # still being synthesized, when nothing is playing - so an interruption
+        # in a pause is recognised (previously only an active playback counted,
+        # and the AI then talked over the caller for the rest of the reply).
+        state.reply_in_progress = True
         try:
             for index in range(len(chunks)):
                 completed, clip = await self._unless_call_ends(state, pending)
@@ -931,6 +1161,13 @@ class AICallController:
                         "Call on channel %s ended during reply synthesis — %d of %d chunks unplayed",
                         state.channel_id,
                         len(chunks) - index,
+                        len(chunks),
+                    )
+                    return stats
+                if state.barge_in_generation != barge_in_generation:
+                    logger.info(
+                        "Caller interrupted while reply chunk %d of %d was being prepared - discarding the rest of the reply",
+                        index + 1,
                         len(chunks),
                     )
                     return stats
@@ -955,6 +1192,7 @@ class AICallController:
                         )
                     return stats
         finally:
+            state.reply_in_progress = False
             if pending is not None and not pending.done():
                 pending.cancel()
             if pending is not None:
@@ -1006,6 +1244,7 @@ class AICallController:
             logger.info("Skipping playback on channel %s: call already ended", state.channel_id)
             return
         playback_started = time.monotonic()
+        state.playback_started_monotonic = playback_started
         request_started = time.monotonic()
         playback_id = self._ari.new_playback_id()
         finished = asyncio.Event()
@@ -1097,18 +1336,34 @@ class AICallController:
         """
         channel_id = (event.get("channel") or {}).get("id")
         state = self._calls.get(channel_id) if channel_id else None
-        if state is None or not state.is_active or not state.active_playback_id:
+        if state is None or not state.is_active:
             return
-
         playback_id = state.active_playback_id
+        if not playback_id and not state.reply_in_progress:
+            return  # ordinary speech while the AI is listening
+
         # Claim it synchronously; repeated talk events cannot stop it twice.
         state.active_playback_id = None
         state.barge_in_generation += 1
+        state.barge_in_count += 1
         stop_started = time.monotonic()
+        if not playback_id:
+            # The caller spoke in the pause between two reply chunks. Nothing is
+            # playing to stop, but bumping the generation discards the chunk that
+            # is being prepared and every one after it.
+            logger.info(
+                "Barge-in detected on channel %s between reply chunks - discarding the rest of the reply",
+                channel_id,
+            )
+            return
+        age_ms = (
+            _ms_since(state.playback_started_monotonic) if state.playback_started_monotonic is not None else None
+        )
         logger.info(
-            "Barge-in detected on channel %s; stopping playback %s",
+            "Barge-in detected on channel %s; stopping playback %s (playback had been running %s ms)",
             channel_id,
             playback_id,
+            age_ms if age_ms is not None else "-",
         )
         try:
             await self._ari.stop_playback(playback_id)
@@ -1174,6 +1429,8 @@ class AICallController:
         state.end_status = status
         state.hangup_cause = hangup_cause
         state.ended.set()
+        self._cancel_task(state.recording_task)
+        self._cancel_task(state.deadline_task)
 
         if state.session_id is not None:
             await self._close_records(state)
@@ -1185,7 +1442,11 @@ class AICallController:
             except AriError:
                 pass  # hung up concurrently — fine
 
-        logger.info("Call finished: channel=%s status=%s cause=%s", channel_id, status, hangup_cause)
+        logger.info(
+            "Call finished: channel=%s status=%s cause=%s duration=%.1fs turns=%d barge_ins=%d ended_by=%s",
+            channel_id, status, hangup_cause, self._elapsed_seconds(state), state.turns_completed,
+            state.barge_in_count, "caller/gateway/Asterisk" if channel_gone else "this worker",
+        )
 
     async def _close_records(self, state: CallState) -> None:
         if state.records_closed:

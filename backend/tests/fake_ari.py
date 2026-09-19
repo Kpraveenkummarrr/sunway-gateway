@@ -16,6 +16,12 @@ class FakeAriClient:
         self.record_params: list[dict] = []
         self.hungup: list[str] = []
         self.stopped_playbacks: list[str] = []
+        self.stopped_recordings: list[str] = []
+        # (channel, value) for every TALK_DETECT(set) the controller applied
+        self.talk_detect_settings: list[tuple[str, str]] = []
+        # channels whose TALK_DETECT was removed (the worker resets it between turns)
+        self.talk_detect_removals: list[str] = []
+        self.fail_set_variable = False
         self.requested_channel_variables: list[tuple[str, str]] = []
         self.channel_variables: dict[str, str] = {
             "CHANNEL(audionativeformat)": "ulaw",
@@ -26,6 +32,7 @@ class FakeAriClient:
         self.rtp_statistics: dict = {
             "txcount": 100,
             "rxcount": 100,
+            "rxoctetcount": 16000,
             "txploss": 0,
             "rxploss": 0,
             "txjitter": 0.0,
@@ -83,6 +90,20 @@ class FakeAriClient:
         if self.on_play_started is not None:
             asyncio.create_task(self._signal_playback_finished(playback_id))
         return {"id": playback_id}
+
+    async def stop_recording(self, name: str) -> None:
+        self.stopped_recordings.append(name)
+
+    async def set_channel_variable(self, channel_id: str, variable: str, value: str) -> None:
+        self._reject_if_gone("variable", channel_id)
+        if self.fail_set_variable:
+            from app.services.ari_client import AriError
+
+            raise AriError("ARI POST variable returned 500", status_code=500)
+        if variable == "TALK_DETECT(set)":
+            self.talk_detect_settings.append((channel_id, value))
+        elif variable == "TALK_DETECT(remove)":
+            self.talk_detect_removals.append(channel_id)
 
     async def stop_playback(self, playback_id: str) -> None:
         self.stopped_playbacks.append(playback_id)
@@ -171,6 +192,12 @@ def hangup_event(channel_id: str) -> dict:
 
 def talking_started_event(channel_id: str) -> dict:
     return {"type": "ChannelTalkingStarted", "channel": {"id": channel_id}}
+
+
+def talking_finished_event(channel_id: str, *, duration_ms: int = 2000) -> dict:
+    """What Asterisk sends once it has heard the configured silence after speech
+    (`duration` is the talking time in ms, as on a live 18.10 system)."""
+    return {"type": "ChannelTalkingFinished", "channel": {"id": channel_id}, "duration": duration_ms}
 
 
 def channel_destroyed_event(channel_id: str) -> dict:

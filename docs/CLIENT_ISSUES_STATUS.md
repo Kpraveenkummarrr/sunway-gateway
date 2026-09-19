@@ -1,7 +1,8 @@
 # Client issues — current status
 
 **Current release:** the [final-pass matrix](#final-pass) supersedes the historical
-status claims below. Physical GSM acceptance remains outstanding.
+status claims below. The 2026-09-19 merge gate is **656 passed, 1 skipped, 0
+failed**; physical GSM acceptance remains outstanding.
 
 Date: 2026-09-17 · Third pass — Sarvam-M local-LLM feasibility and noise root-cause
 

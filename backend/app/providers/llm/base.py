@@ -30,6 +30,9 @@ class LLMProvider(ABC):
         provider that doesn't override this still logs something useful."""
         return type(self).__name__
 
+    async def warm_up(self) -> None:
+        """Open connections ahead of the first request. Optional; must never raise."""
+
     def for_max_tokens(self, max_tokens: int) -> "LLMProvider":
         """Immutable per-turn configuration view; mocks need no token limit."""
         return self

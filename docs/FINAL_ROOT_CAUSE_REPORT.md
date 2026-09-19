@@ -1,4 +1,27 @@
-# Final engineering pass — 2026-09-17, continued 2026-09-18
+# Final engineering pass — 2026-09-17, continued 2026-09-18, 2026-09-19
+
+## Update 2026-09-19 — the four problems in the latest brief
+
+Everything below was reproduced or measured on a **real Asterisk 18.10 with a simulated gateway**
+(`backend/scripts/dev_call_harness.py`, `sim_gsm_caller.py`). No physical GSM/Synway was available:
+anything that depends on it is marked **NOT PROVEN — requires live GSM/Synway test**.
+
+| Problem | Root cause (proven where stated) | Fix | Result |
+|---|---|---|---|
+| 15–20 s after every question | Comfort-noise (PT 13) gateway ⇒ Asterisk's voice-frame-driven silence detector never fires ⇒ every turn runs to the 20 s cap (proven on Asterisk 18.10) | Worker-side end-of-speech from TALK_DETECT events + RTP receive counters — [details](LATENCY_ROOT_CAUSE.md) | CN end-of-speech wait 16.6 s → ~1.3 s; caller speech 100% captured |
+| Calls drop at ~2:45 | `AI_CALL_TIMEOUT_SECONDS=120`, checked only at turn ends, no goodbye (reproduced: cut at 143 s) | 900 s default, timer-enforced, polite closing — [details](CALL_DISCONNECT_ROOT_CAUSE.md) | call stays up past 3 min; **client `.env` must be edited** |
+| Noisy / robotic voice | Not localised. Same processing for welcome and replies; replies carry digits/units/acronyms; WSOLA 1.15× barely measurable | Clean chain, tempo off by default, Hindi spoken-text normalisation, A/B tool — [details](VOICE_ROOT_CAUSE.md) | NOT PROVEN — requires live GSM/Synway test |
+| Interruption ignored | (a) interruption in the pause between reply chunks was ignored (AI talked over caller 2.72 s); (b) detector stuck "talking" on comfort-noise gateways; (c) threshold 500 missed soft callers | Whole-reply barge-in flag, per-turn detector reset, threshold as a setting — [details](BARGE_IN.md) | gap overlap 2.72 s → 0.0 s |
+| KB "information unavailable" | Vector-ranked 50-row window over noise; Hindi function words counted as content | Full-corpus lexical channel — [details](RAG_ROOT_CAUSE.md) | 22/22 on a synthetic Hindi KB; client's real KB NOT PROVEN |
+
+A defect in this work's first version (file-following end-of-speech monitor cut callers off, because
+Asterisk buffers recordings in 32 KiB blocks) was found by measurement, removed, and is documented in
+the latency document. Gateway A/B plan: [SYNWAY_GSM_AB_PLAN.md](SYNWAY_GSM_AB_PLAN.md).
+Client steps: [CLIENT_UAT_UPDATE_20260919.md](CLIENT_UAT_UPDATE_20260919.md).
+
+---
+
+## Earlier passes (2026-09-17/18)
 
 Baseline: `2fcc966` on main. Work isolated on `engineering/final-uat-20260917`.
 Runtime/regression commit: `1c951f9`; diagnostic-tool commit: `b103aef`.
@@ -49,6 +72,12 @@ See [voice evidence and procedure](VOICE_ROOT_CAUSE.md).
 - LLM responses remain buffered; sentence-TTS prefetch is retained. First useful text is available only when the full LLM response arrives. No unsupported streaming rewrite was deployed.
 
 ## Evidence and release instructions
+
+Current merge gate (2026-09-19): Python compilation completed cleanly and the
+complete repository suite finished **656 passed, 1 skipped, 0 failed in
+114.08 s**. The one skip is the deliberately opt-in real-provider integration
+test. This supersedes the incomplete/interrupted local-suite results below;
+those older numbers are retained as engineering history.
 
 Baseline full suite: **408 passed, 1 skipped**, 91.68 s. The skip is the opt-in
 real-provider integration test. Targeted revised call/audio/embedding suite:

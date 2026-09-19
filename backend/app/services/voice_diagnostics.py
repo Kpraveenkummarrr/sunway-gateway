@@ -21,12 +21,64 @@ from app.services.audio import (
     AudioFormatError,
     measure_levels,
     normalize_for_asterisk_playback,
+    prepare_tts_clip,
     prepare_tts_for_playback,
     read_wav_info,
     _read_pcm,
 )
 
 SUPPORTED_G711_CODECS = ("ulaw", "alaw")
+
+
+def roughness_metrics(samples: np.ndarray, rate: int) -> dict[str, float | int | None]:
+    """Objective roughness measures of voiced speech: frame-to-frame F0 change
+    (jitter) and harmonic-to-noise ratio, from a normalised autocorrelation on
+    30 ms frames every 10 ms. These are diagnostics for comparing two renderings
+    of the SAME utterance (does a processing stage make it rougher?), not a
+    naturalness score - only a listener can give that.
+
+    Measured on genuine speech (Windows SAPI, English, 48 kHz): the previous
+    chain's 1.15x WSOLA stage moved median F0 jitter 1.83% -> 1.94% and mean HNR
+    by -0.2 dB, i.e. barely; that is why tempo was not blamed for the robotic
+    sound without listening evidence."""
+    frame, hop = int(0.030 * rate), int(0.010 * rate)
+    lo, hi = int(rate / 400), int(rate / 70)
+    window = np.hanning(frame)
+    f0s: list[float] = []
+    hnrs: list[float] = []
+    for start in range(0, max(0, len(samples) - frame - hi), hop):
+        segment = samples[start : start + frame + hi]
+        head = segment[:frame] * window
+        if np.sqrt(np.mean(head**2)) < 0.01:
+            f0s.append(np.nan)
+            hnrs.append(np.nan)
+            continue
+        energy = float(np.dot(head, head))
+        best, best_lag = -1.0, lo
+        for lag in range(lo, hi):
+            tail = segment[lag : lag + frame] * window
+            r = float(np.dot(head, tail)) / math.sqrt(energy * float(np.dot(tail, tail)) + 1e-12)
+            if r > best:
+                best, best_lag = r, lag
+        if best < 0.55:
+            f0s.append(np.nan)
+            hnrs.append(np.nan)
+            continue
+        f0s.append(rate / best_lag)
+        peak = min(best, 0.999)
+        hnrs.append(10 * math.log10(peak / (1 - peak)))
+    f0 = np.array(f0s)
+    ok = ~np.isnan(f0)
+    pairs = ok[:-1] & ok[1:]
+    if int(ok.sum()) < 3 or not pairs.any():
+        return {"voiced_frames": int(ok.sum()), "f0_jitter_median_pct": None, "f0_jitter_p90_pct": None, "hnr_mean_db": None}
+    change = np.abs(np.log(f0[1:][pairs] / f0[:-1][pairs]))
+    return {
+        "voiced_frames": int(ok.sum()),
+        "f0_jitter_median_pct": float(np.median(change)) * 100,
+        "f0_jitter_p90_pct": float(np.percentile(change, 90)) * 100,
+        "hnr_mean_db": float(np.nanmean(np.array(hnrs))),
+    }
 
 
 def describe_wav(wav_bytes: bytes, *, word_count: int = 0) -> dict[str, int | float | str | None]:
@@ -67,6 +119,13 @@ def describe_wav(wav_bytes: bytes, *, word_count: int = 0) -> dict[str, int | fl
     report["estimated_f0_hz"] = float(np.median(pitches)) if pitches else None
     report["f0_voiced_frames"] = len(pitches)
     report["noise_floor_method"] = "10th percentile frame RMS; not isolated background noise"
+    full_spectrum = np.abs(np.fft.rfft(samples * np.hanning(len(samples)))) ** 2 if len(samples) else np.zeros(1)
+    if full_spectrum.sum() > 0:
+        cumulative = np.cumsum(full_spectrum) / full_spectrum.sum()
+        report["spectral_rolloff_95_hz"] = float(np.fft.rfftfreq(len(samples), 1 / rate)[int(np.searchsorted(cumulative, 0.95))])
+    else:
+        report["spectral_rolloff_95_hz"] = None
+    report.update(roughness_metrics(samples, rate))
     return report
 
 
@@ -117,6 +176,11 @@ def build_voice_ab_variants(
     resampled = normalize_for_asterisk_playback(source_wav)
     current = prepare_tts_for_playback(source_wav, speed=current_speed)
     candidate = prepare_tts_for_playback(source_wav, speed=candidate_speed)
+    # The two arms of the noisy/robotic-voice question, from the same source:
+    #   A = the chain production ran before (legacy, 1.15x WSOLA tempo)
+    #   B = what production runs now (clean chain, speed 1.0: no tempo processing at all)
+    previous_production = prepare_tts_clip(source_wav, speed=1.15, profile="legacy").audio
+    native_clean = prepare_tts_clip(source_wav, speed=1.0, profile="clean").audio
     return {
         "A_original_bhashini.wav": source_wav,
         "B0_resample_only_8k.wav": resampled,
@@ -128,4 +192,9 @@ def build_voice_ab_variants(
         "C2_candidate_ulaw_preview.wav": g711_roundtrip(candidate, codec="ulaw"),
         "C3_current_alaw_preview.wav": g711_roundtrip(current, codec="alaw"),
         "C4_candidate_alaw_preview.wav": g711_roundtrip(candidate, codec="alaw"),
+        "D1_A_previous_production_legacy_1_15x_8k.wav": previous_production,
+        "D2_B_native_clean_1_0x_8k.wav": native_clean,
+        "D3_clean_chain_at_current_speed_8k.wav": prepare_tts_clip(source_wav, speed=current_speed, profile="clean").audio,
+        "D4_A_previous_production_ulaw_preview.wav": g711_roundtrip(previous_production, codec="ulaw"),
+        "D5_B_native_clean_ulaw_preview.wav": g711_roundtrip(native_clean, codec="ulaw"),
     }
