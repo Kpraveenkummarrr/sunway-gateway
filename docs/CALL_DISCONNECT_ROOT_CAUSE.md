@@ -30,8 +30,8 @@ default: set it to `900` (or use the panel). See [the execution sheet](CLIENT_UA
 
 | | Before | After |
 |---|---:|---:|
-| Call length (same scenario, 15 s provider latency per answer) | **143.2 s**, cut by `Call timeout reached` | @@LONG@@ |
-| Answers received | 2 | @@LONGN@@ |
+| Call length (same scenario, 15 s provider latency per answer) | **143.2 s**, cut by `Call timeout reached` | **212.1 s** (planned end; no timeout logged; 6 answers; the earlier 254.6 s / 8-answer run used the discarded file-based monitor) |
+| Answers received | 2 | 6 |
 
 `tests/test_call_duration_limit.py` (8 tests): the default is 900; a call past its limit gets a
 goodbye and cause `max_duration`; a call at 170 s with the default is left alone; 0 disables the

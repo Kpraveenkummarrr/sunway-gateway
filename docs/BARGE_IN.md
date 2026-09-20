@@ -36,7 +36,7 @@ played the remaining chunks over the caller.
 
 | | Before | After |
 |---|---:|---:|
-| Interruption during the gap between chunks: AI audio heard while the caller was speaking | **2.72 s** | see table below |
+| Interruption during the gap between chunks: AI audio heard while the caller was speaking | **2.72 s** | **0.0 s** |
 | Was a stop issued | never (no playback to stop) | remaining chunks discarded |
 
 ### 2. A "stuck talking" detector made barge-in impossible on some gateways — mitigated
@@ -85,11 +85,9 @@ Automated (all run in the suite):
 
 Real Asterisk, simulated gateway (raw numbers in the latency document's tables):
 
-- in-flight interruption: TALK_DETECT event, stop request and last AI packet all
-  within a few hundred ms of the caller starting to speak, 0.0 s of overlap;
+- in-flight interruption: TALK_DETECT event and stop request at 140 ms, 0.0 s of overlap;
 - interruption between chunks: 0.0 s of overlap (was 2.72 s);
-- interruption in comfort-noise and DTX modes with a 0 ms hangover gateway:
-  detected, playback stopped.
+- interruption with a comfort-noise / DTX gateway with 0 ms hangover: detected at 131 / 130 ms, playback stopped, 0.0 s overlap.
 
 ## Not proven — requires live GSM/Synway test
 

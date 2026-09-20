@@ -25,7 +25,7 @@ delays (ASR 1.2 s + LLM 1.0 s + TTS 1.0 s = 3.2 s), 100% of the question capture
 | Gateway in silence | End-of-speech wait, before | after | Reply heard after caller stopped, before | after |
 |---|---:|---:|---:|---:|
 | Continuous voice frames | 2.0 s | **1.3 s** | 5.6 s | **4.8 s** |
-| **Comfort noise (payload 13) — the client's case** | **16.6 s** (ended by the 20 s cap) | **@@CN@@ s** | **20.2 s** | **@@CNH@@ s** |
+| **Comfort noise (payload 13) — the client's case** | **16.6 s** (ended by the 20 s cap) | **1.3 s** | **20.2 s** | **4.8 s** |
 | No packets (DTX) | 4.0–4.8 s | **1.3 s** | 8.5 s | **5.1 s** |
 | Comfort noise, 100 ms hangover of voice frames | — | 1.5 s | — | 5.2 s |
 | Comfort noise, **no** hangover | — | 1.3 s | — | 5.2 s |
