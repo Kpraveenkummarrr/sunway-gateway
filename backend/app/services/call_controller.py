@@ -206,6 +206,7 @@ class CallState:
         "barge_in_count",
         "playback_started_monotonic",
         "answered_monotonic",
+        "welcome_playing",
     )
 
     def __init__(
@@ -253,6 +254,9 @@ class CallState:
         self.barge_in_count = 0
         self.playback_started_monotonic: float | None = None
         self.answered_monotonic: float | None = None
+        # True while the welcome plays: line noise or a caller's "hello" in the first second
+        # must not cut it (seen on the client: every call's welcome stopped at ~1.0 s).
+        self.welcome_playing = False
 
     @property
     def is_active(self) -> bool:
@@ -612,12 +616,15 @@ class AICallController:
         self._settings = updated
 
     async def _play_welcome(self, state: CallState) -> None:
+        state.welcome_playing = not self._settings_for(state).ai_welcome_interruptible
         try:
             await self._play_caller_message(state, "welcome")
         except (TTSProviderError, AriError):
             logger.exception("Welcome message playback failed for channel %s", state.channel_id)
             # Not fatal — continue into the conversation loop even if the
             # welcome prompt couldn't be played.
+        finally:
+            state.welcome_playing = False
 
     async def _start_next_recording(self, state: CallState) -> None:
         if not state.is_active:
@@ -1337,6 +1344,9 @@ class AICallController:
         channel_id = (event.get("channel") or {}).get("id")
         state = self._calls.get(channel_id) if channel_id else None
         if state is None or not state.is_active:
+            return
+        if state.welcome_playing:
+            logger.info("Caller/noise heard during the welcome on channel %s - welcome not interrupted", channel_id)
             return
         playback_id = state.active_playback_id
         if not playback_id and not state.reply_in_progress:

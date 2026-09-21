@@ -133,6 +133,8 @@ class Settings(BaseSettings):
     # silence_ms is how long Asterisk waits before reporting "finished talking";
     # keep it short (100-300): it is also the voice-frame hangover a
     # comfort-noise gateway must provide for that event to arrive at all.
+    # False (default): speech or line noise during the welcome does not stop it.
+    ai_welcome_interruptible: bool = False
     ai_talk_detect_override: bool = True
     ai_talk_detect_threshold: int = 350
     ai_talk_detect_silence_ms: int = 200
