@@ -319,7 +319,13 @@ class AICallController:
     async def prewarm_caller_messages(self) -> None:
         """Renders the welcome/error/goodbye phrases once so no call waits
         on TTS for them. Failures are logged, not raised — a call that finds
-        no rendered phrase just renders it itself."""
+        no rendered phrase just renders it itself.
+
+        Panel overrides are loaded first: rendering the .env phrases and then
+        discovering different panel phrases on the first call threw the cache
+        away, so the first call after every restart waited for TTS (seen on the
+        client: welcome 17 s + 40-60 s render, callers hung up)."""
+        await self._refresh_settings()
         for kind in _CALLER_MESSAGE_KINDS:
             started = time.monotonic()
             try:
